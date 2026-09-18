@@ -1,3 +1,3 @@
 <resources>
-    <string name="app_name">Jarvis</string>
+    <!-- app_name is generated from JARVIS_APP_NAME in keys.properties (default "Jarvis"); see app/build.gradle. -->
 </resources>

@@ -151,12 +151,30 @@ screens add `BackHandler { screen = Chat }`.
 - **Wake-word sensitivity is NOT the library threshold.** `MODEL_THRESHOLD=0.95f`
   is set deliberately high to keep openWakeWord's own detection + logging dormant;
   the app drives detection off the **raw `scores` Flow** (not `detections`) in
-  `WakeWordService.onScore`. The effective bar is `STRONG_THRESHOLD=0.3f` (single
-  frame) OR `SUSTAINED_THRESHOLD=0.2f` (`SMOOTHING_FRAMES=5`-frame avg, ~0.4 s),
-  with `REFRACTORY_MS=2500L` anti-re-fire. These were lowered from 0.5/0.35/3 when
-  the active model changed to `jarvis_v1` (see below). `COOLDOWN_MS` is dead config
-  (engine `detections` is never consumed). Tune `STRONG`/`SUSTAINED`/
-  `SMOOTHING_FRAMES`, not `MODEL_THRESHOLD`.
+  `WakeWordService.onScore`. The effective bar is a **per-model** `strong` (single
+  frame) OR `sustained` (`SMOOTHING_FRAMES=5`-frame avg, ~0.4 s) score, kept in `WakeModels`
+  (`jarvis_v1` 0.3/0.2, `hey_jarvis_v0.1` 0.5/0.35, custom 0.5/0.35) and scaled by the
+  Settings sensitivity (×1.4 / ×1.0 / ×0.7), with `REFRACTORY_MS=2500L` anti-re-fire.
+  `COOLDOWN_MS` is dead config (engine `detections` is never consumed). Tune the
+  `WakeModels` bars / `SENSITIVITY` / `SMOOTHING_FRAMES`, not `MODEL_THRESHOLD`.
+- **A custom wake phrase (e.g. "Hey Hades") is an imported openWakeWord classifier, not typed text.**
+  The library (`xyz.rementia:openwakeword`) can only load a classifier from *assets* (its
+  `OnnxModelRunner`/`AudioRecorder` are `internal`), so `wake/CustomWakeEngine.kt` is an adapted copy of
+  its feature pipeline (Apache-2.0, attribution in the file header) that takes the classifier as bytes.
+  `WakeModels.importCustom` copies the file to `filesDir/wake/custom.onnx` after checking it takes a
+  `[batch, 16, 96]` input (all bundled classifiers do). Bundled models still use the library engine;
+  `WakeWordService` hides both behind a private `Detector`. `WakeWordService.reload()` restarts it after a
+  Settings change (write the setting first, then reload — the service re-reads DataStore). Because the
+  library only exposes ONNX Runtime at runtime, `app/build.gradle` also declares
+  `onnxruntime-android:1.18.0` (the library's own version) so this code can compile against it.
+  The custom engine's pipeline was checked against the bundled models with a line-for-line Python port
+  (synthetic "Hey Jarvis" peaks at 1.00, unrelated speech at 0.00); it has not run on a device.
+- **The wake listener hears the phone's own speaker.** A TTS voice saying the wake phrase scores 1.00, so
+  anything that plays audio while the listener is armed must pause it: a conversation does
+  (`pauseListening` on start, re-arm after `WAKE_REARM_DELAY_MS`), and Settings does for the local-voice
+  sample and the ElevenLabs preview (`WakeWordService.pauseListening/resumeListening`, 800 ms settle).
+  The sample text must not contain the wake phrase. There is no acoustic echo cancellation — gating our own
+  playback is the fix, since we know when we're playing.
 - **`onScore` state is unsynchronized** and only safe because the `scores`
   collector runs on `uiScope` (Main). Don't move the collector off the main thread.
 - **Wake word is owned by whoever holds the mic.** `pauseEngine()` before
@@ -272,14 +290,24 @@ screens add `BackHandler { screen = Chat }`.
   in `.gitignore` alongside `*.keystore`, `secrets.properties`, `local.properties`,
   and `.aidelegate/`). Keys belong in `keys.properties` or the Hermes server
   `.env`; never echo them back or commit them.
+- **The assistant's name is configurable.** In-app text and notification titles read
+  `JarvisSettings.assistantName` (Settings → Assistant; default `BuildConfig.DEFAULT_ASSISTANT_NAME`), which
+  `MainActivity` exposes to every screen as `LocalBranding` (`ui/Branding.kt`, also carries the active wake
+  phrase). Don't hardcode "Jarvis" in UI text — read `LocalBranding.current.name`; `WakeWordService` keeps
+  its own copy for notifications and `WakeWordService.reload()` refreshes it on a rename. The launcher /
+  assistant-picker label can't change at runtime, so `app/build.gradle` takes an optional `JARVIS_APP_NAME`
+  from `keys.properties` and feeds both `resValue app_name` (no `app_name` in `strings.xml` any more) and
+  `BuildConfig.DEFAULT_ASSISTANT_NAME`. `resValue` is XML-escaped by AGP itself; only Android string
+  escapes (`\'`, `\"`, leading `@`/`?`) are added in `resEscape` — verified with `aapt2 dump badging`.
+  Internal identifiers (package `dk.foss.jarvis`, `Jarvis*` class names, `jarvis_*` channel ids, the
+  bundled "Hey Jarvis" wake-model labels) deliberately stay, since they name code or a model, not the product.
 - `usesCleartextTraffic="true"` is intentional (self-hosted/LAN Hermes over HTTP).
 - ONNX models live in `app/src/main/assets/`. The shared frontend
   (`melspectrogram.onnx`) + embedding (`embedding_model.onnx`) are loaded
-  implicitly by openWakeWord. The active **wake-phrase** model named in code is
-  `jarvis_v1.onnx` (community model, higher recall); `jarvis_v2.onnx` (lower
-  false-positive rate, lower recall) and the original `hey_jarvis_v0.1.onnx` (low
-  recall, peaked ~0.3–0.45) are kept as alternates — swap the one `WakeWordModel`
-  entry in `WakeWordService.startEngine` to change it. Native libs are ARM-only
+  implicitly by openWakeWord. The **wake phrase** is a Settings choice (`wakeModel`), catalogued in
+  `wake/WakeModels.kt`: `jarvis_v1.onnx` (default; community model, higher recall), `jarvis_v2.onnx`
+  (lower false-positive rate, lower recall) and the original `hey_jarvis_v0.1.onnx` (low recall,
+  peaked ~0.3–0.45). Add a bundled phrase = an asset + one `WakeModels.bundled` entry. Native libs are ARM-only
   (`abiFilters 'arm64-v8a','armeabi-v7a'`) — x86 emulators won't run wake-word
   inference.
 - Editing assistant capabilities means editing `res/xml/interaction_service.xml`

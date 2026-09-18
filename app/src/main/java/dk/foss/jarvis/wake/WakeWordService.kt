@@ -18,24 +18,46 @@ import androidx.core.app.ServiceCompat
 import com.rementia.openwakeword.lib.WakeWordEngine
 import com.rementia.openwakeword.lib.model.DetectionMode
 import com.rementia.openwakeword.lib.model.WakeWordModel
+import dk.foss.jarvis.BuildConfig
 import dk.foss.jarvis.MainActivity
 import dk.foss.jarvis.R
+import dk.foss.jarvis.data.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * Always-on "Hey Jarvis" listener. Runs openWakeWord in a microphone foreground
- * service; on detection, brings up conversation mode. Requires RECORD_AUDIO.
+ * Always-on wake-phrase listener ("Hey Jarvis" by default; see [WakeModels]). Runs openWakeWord in a
+ * microphone foreground service; on detection, brings up conversation mode. Requires RECORD_AUDIO.
  */
 class WakeWordService : Service() {
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var engine: WakeWordEngine? = null
+    /** One source of per-frame wake scores: the library engine (bundled models) or [CustomWakeEngine]. */
+    private interface Detector {
+        val scores: Flow<Float>
+        fun start()
+        fun stop()
+        fun release()
+    }
+
+    private var detector: Detector? = null
+    private var scoreJob: Job? = null
+    private var loadGen = 0
+    private var phrase = "" // set once the model is resolved; the first notification says "Starting…"
+    private var assistantName = BuildConfig.DEFAULT_ASSISTANT_NAME
+    // Score bars for the model in use at the chosen sensitivity (set in startEngine).
+    private var strongThreshold = 0.3f
+    private var sustainedThreshold = 0.2f
 
     @Volatile private var cooling = false
     @Volatile private var paused = false
@@ -67,31 +89,76 @@ class WakeWordService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     private fun startEngine() {
-        if (engine != null) return
-        runCatching {
-            // Threshold is set high so the library's own detection (and its logging) stays
-            // quiet — we make the decision ourselves from the raw `scores` flow below.
-            val models = listOf(
-                // Community model from home-assistant-wakewords-collection — trained on
-                // 25k synthetic examples of "jarvis" / "hey jarvis" with 500k steps.
-                // Much higher recall than the original hey_jarvis_v0.1 (which peaked at
-                // ~0.3-0.45 and often missed). Fallback: hey_jarvis_v0.1.onnx.
-                WakeWordModel("jarvis", "jarvis_v1.onnx", MODEL_THRESHOLD),
-            )
-            val e = WakeWordEngine(this, models, DetectionMode.SINGLE_BEST, COOLDOWN_MS, engineScope)
-            engine = e
-            uiScope.launch { e.scores.collect { onScore(it.score) } }
-            e.start()
-            Log.i(TAG, "wake engine started, listening for 'hey jarvis'")
-        }.onFailure {
-            // Most likely missing model assets or no mic permission — stop gracefully.
-            Log.e(TAG, "wake engine failed to start", it)
-            stopSelf()
+        if (detector != null) return
+        val gen = ++loadGen
+        uiScope.launch {
+            try {
+                val settings = SettingsStore(applicationContext).settings.first()
+                val model = WakeModels.resolve(applicationContext, settings.wakeModel, settings.wakeCustomName)
+                // Loading the ONNX sessions takes a moment; keep it off the main thread.
+                val built = withContext(Dispatchers.Default) { buildDetector(model) }
+                if (gen != loadGen) { // reloaded or destroyed while loading
+                    runCatching { built.release() }
+                    return@launch
+                }
+                val mult = SENSITIVITY[settings.wakeSensitivity.coerceIn(0, 2)]
+                strongThreshold = (model.strong * mult).coerceAtMost(MAX_BAR)
+                sustainedThreshold = (model.sustained * mult).coerceAtMost(MAX_BAR)
+                phrase = model.phrase
+                assistantName = settings.assistantName
+                detector = built
+                scoreJob = uiScope.launch { built.scores.collect { onScore(it) } }
+                if (!paused) built.start()
+                updateOngoing()
+                Log.i(TAG, "wake engine ready, listening for '${model.phrase}' " +
+                    "(bars %.2f / %.2f)".format(strongThreshold, sustainedThreshold))
+            } catch (e: Throwable) {
+                // Most likely missing model assets or no mic permission — stop gracefully.
+                Log.e(TAG, "wake engine failed to start", e)
+                stopSelf()
+            }
         }
     }
 
+    private fun buildDetector(model: WakeModel): Detector {
+        if (model.asset == null) {
+            val engine = CustomWakeEngine(this, WakeModels.customFile(this).readBytes(), engineScope)
+            return object : Detector {
+                override val scores = engine.scores
+                override fun start() = engine.start()
+                override fun stop() = engine.stop()
+                override fun release() = engine.release()
+            }
+        }
+        // Threshold is set high so the library's own detection (and its logging) stays
+        // quiet — we make the decision ourselves from the raw `scores` flow.
+        val engine = WakeWordEngine(
+            this, listOf(WakeWordModel(model.id, model.asset, MODEL_THRESHOLD)),
+            DetectionMode.SINGLE_BEST, COOLDOWN_MS, engineScope,
+        )
+        return object : Detector {
+            override val scores = engine.scores.map { it.score }
+            override fun start() = engine.start()
+            override fun stop() = engine.stop()
+            override fun release() = engine.release()
+        }
+    }
+
+    /** Drop the running detector and start again from the current settings (phrase, sensitivity). */
+    private fun reload() {
+        loadGen++
+        scoreJob?.cancel(); scoreJob = null
+        val old = detector
+        detector = null
+        runCatching { old?.stop(); old?.release() }
+        recentScores.clear()
+        inBurst = false
+        burstPeak = 0f
+        startEngine()
+    }
+
     /**
-     * Raw confidence for "hey jarvis" arrives every ~80 ms. The wake phrase keeps the
+     * Raw confidence for the wake phrase arrives every ~80 ms. The wake phrase keeps the
      * score elevated for several frames, so we fire on EITHER one strong frame (keeps the
      * old behaviour, no recall regression) OR a sustained moderate average over a short
      * window (catches utterances that peak just under the single-frame bar, or whose one
@@ -111,8 +178,8 @@ class WakeWordService : Service() {
         recentScores.addLast(score)
         while (recentScores.size > SMOOTHING_FRAMES) recentScores.removeFirst()
         val sustained = recentScores.size == SMOOTHING_FRAMES &&
-            recentScores.sum() / SMOOTHING_FRAMES >= SUSTAINED_THRESHOLD
-        if (score < STRONG_THRESHOLD && !sustained) return
+            recentScores.sum() / SMOOTHING_FRAMES >= sustainedThreshold
+        if (score < strongThreshold && !sustained) return
 
         val now = SystemClock.elapsedRealtime()
         if (now - lastTriggerAt < REFRACTORY_MS) return
@@ -154,7 +221,7 @@ class WakeWordService : Service() {
         val pi = PendingIntent.getActivity(this, 1, launch, flags)
         val notif = NotificationCompat.Builder(this, CHANNEL_WAKE)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Jarvis")
+            .setContentTitle(assistantName)
             .setContentText("Listening…")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -176,12 +243,17 @@ class WakeWordService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ONGOING)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Jarvis")
-            .setContentText("Listening for “Hey Jarvis”")
+            .setContentTitle(assistantName)
+            .setContentText(if (phrase.isEmpty()) "Starting…" else "Listening for “$phrase”")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(open)
             .build()
+    }
+
+    private fun updateOngoing() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching { nm.notify(NOTIF_ONGOING, ongoingNotification()) }
     }
 
     private fun createChannels() {
@@ -199,7 +271,7 @@ class WakeWordService : Service() {
     private fun pauseEngine() {
         if (paused) return
         paused = true
-        runCatching { engine?.stop() }
+        runCatching { detector?.stop() }
         recentScores.clear()
         inBurst = false
         burstPeak = 0f
@@ -210,14 +282,16 @@ class WakeWordService : Service() {
     private fun resumeEngine() {
         if (!paused) return
         paused = false
-        runCatching { engine?.start() }
+        runCatching { detector?.start() }
         Log.i(TAG, "wake resumed")
     }
 
     override fun onDestroy() {
         instance = null
-        runCatching { engine?.stop(); engine?.release() }
-        engine = null
+        loadGen++
+        scoreJob?.cancel()
+        runCatching { detector?.stop(); detector?.release() }
+        detector = null
         runCatching { engineScope.cancel() }
         runCatching { uiScope.cancel() }
         super.onDestroy()
@@ -234,12 +308,11 @@ class WakeWordService : Service() {
         // Model threshold kept high so the library's built-in detection/logging stays
         // dormant; we decide from `scores` below.
         private const val MODEL_THRESHOLD = 0.95f
-        // Fire on a single strong frame (lowered from 0.5 — community jarvis_v1 model
-        // scores differently than hey_jarvis_v0.1, peaks are more moderate)...
-        private const val STRONG_THRESHOLD = 0.3f
-        // ...or on a sustained moderate average over the smoothing window (lowered
-        // to catch more near-misses with the new model).
-        private const val SUSTAINED_THRESHOLD = 0.2f
+        // The score bars now live per model in WakeModels (a single strong frame, or a sustained
+        // moderate average over the smoothing window). They're scaled by the sensitivity setting:
+        // index 0 = stricter, 1 = normal, 2 = more sensitive.
+        private val SENSITIVITY = floatArrayOf(1.4f, 1.0f, 0.7f)
+        private const val MAX_BAR = 0.95f
         private const val SMOOTHING_FRAMES = 5 // ~0.4 s at 80 ms/frame (was 3)
         private const val REFRACTORY_MS = 2500L // ignore re-triggers right after a fire
         private const val BURST_FLOOR = 0.1f // score above which a "voice burst" is in progress
@@ -254,6 +327,11 @@ class WakeWordService : Service() {
 
         fun resumeListening() {
             instance?.resumeEngine()
+        }
+
+        /** Apply a changed wake phrase / model / sensitivity to the running listener. */
+        fun reload() {
+            instance?.reload()
         }
 
         fun start(context: Context) {

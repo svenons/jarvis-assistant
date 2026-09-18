@@ -14,6 +14,15 @@ def defBaseUrl = jvEscape(keysProps.getProperty("JARVIS_BASE_URL", ""))
 def defApiKey = jvEscape(keysProps.getProperty("JARVIS_API_KEY", ""))
 def defElevenKey = jvEscape(keysProps.getProperty("JARVIS_ELEVEN_KEY", ""))
 def defElevenVoice = jvEscape(keysProps.getProperty("JARVIS_ELEVEN_VOICE", ""))
+// The assistant's name. It is the launcher / app-switcher / assistant-picker label (fixed at install
+// time by Android) and the default for the in-app name, which Settings can override at runtime.
+def appName = keysProps.getProperty("JARVIS_APP_NAME", "").trim() ?: "Jarvis"
+// AGP already XML-escapes resValue (& and <), but aapt still parses Android string escapes: backslash
+// before quotes/apostrophes, and before a leading @ or ? (which would read as a resource reference).
+def resEscape = { String s ->
+    def t = s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"")
+    (t.startsWith("@") || t.startsWith("?")) ? "\\" + t : t
+}
 
 android {
     namespace 'dk.foss.jarvis'
@@ -36,6 +45,8 @@ android {
         buildConfigField "String", "DEFAULT_API_KEY", "\"${defApiKey}\""
         buildConfigField "String", "DEFAULT_ELEVEN_KEY", "\"${defElevenKey}\""
         buildConfigField "String", "DEFAULT_ELEVEN_VOICE", "\"${defElevenVoice}\""
+        buildConfigField "String", "DEFAULT_ASSISTANT_NAME", "\"${jvEscape(appName)}\""
+        resValue "string", "app_name", resEscape(appName)
     }
 
     buildTypes {
@@ -123,6 +134,9 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'xyz.rementia:openwakeword:0.1.5' // wake word (package com.rementia.openwakeword.lib)
+    // The wake library only exposes ONNX Runtime at runtime; CustomWakeEngine / WakeModels use its API
+    // directly, so compile against it too — same version the library resolves, so nothing else changes.
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
     implementation(files(sherpaAar) { builtBy 'fetchSherpaOnnx' }) // on-device STT + TTS (package com.k2fsa.sherpa.onnx)
     implementation 'org.apache.commons:commons-compress:1.28.0' // unpacks the .tar.bz2 TTS voice archives
 

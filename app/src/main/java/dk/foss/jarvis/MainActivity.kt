@@ -9,7 +9,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,6 +21,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dk.foss.jarvis.data.SettingsStore
+import dk.foss.jarvis.ui.Branding
 import dk.foss.jarvis.ui.ChatScreen
 import dk.foss.jarvis.ui.ChatViewModel
 import dk.foss.jarvis.ui.ConversationScreen
@@ -26,7 +29,9 @@ import dk.foss.jarvis.ui.ConversationViewModel
 import dk.foss.jarvis.ui.HistoryScreen
 import dk.foss.jarvis.ui.HistoryViewModel
 import dk.foss.jarvis.ui.JarvisTheme
+import dk.foss.jarvis.ui.LocalBranding
 import dk.foss.jarvis.ui.SettingsScreen
+import dk.foss.jarvis.wake.WakeModels
 import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -41,7 +46,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Keep the screen awake while Jarvis is in the foreground.
+        // Keep the screen awake while the assistant is in the foreground.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // Edge-to-edge dark: transparent bars, dark background, light icons.
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -57,6 +62,15 @@ class MainActivity : ComponentActivity() {
         rearmWakeWord()
 
         setContent {
+            // The assistant's name and wake phrase, shown across the screens; follows Settings live.
+            val settings by remember { SettingsStore(this@MainActivity).settings }.collectAsState(initial = null)
+            val branding = settings?.let { s ->
+                Branding(
+                    name = s.assistantName,
+                    wakePhrase = if (s.wakeEnabled) WakeModels.resolve(this@MainActivity, s.wakeModel, s.wakeCustomName).phrase else null,
+                )
+            } ?: Branding(BuildConfig.DEFAULT_ASSISTANT_NAME, null)
+            CompositionLocalProvider(LocalBranding provides branding) {
             JarvisTheme {
                 var screen by remember {
                     mutableStateOf(if (assistEpoch > 0) Screen.Conversation else Screen.Chat)
@@ -97,6 +111,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+            }
             }
         }
     }

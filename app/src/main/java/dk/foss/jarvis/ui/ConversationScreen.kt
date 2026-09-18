@@ -300,8 +300,9 @@ private fun IdleContent(hasPermission: Boolean, hint: String?, onMicTap: () -> U
                     )
                 }
             } else {
+                val wakePhrase = LocalBranding.current.wakePhrase
                 Text(
-                    text = "Tap, or say \"Hey Jarvis\"",
+                    text = if (wakePhrase != null) "Tap, or say \u201C$wakePhrase\u201D" else "Tap to talk",
                     fontFamily = DmSans,
                     fontWeight = FontWeight.Normal,
                     fontSize = 14.sp,
@@ -651,7 +652,7 @@ private fun ErrorLayout(
             }
 
             Text(
-                text = "Can't reach Jarvis",
+                text = "Can't reach ${LocalBranding.current.name}",
                 fontFamily = SpaceGrotesk,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 21.sp,

@@ -43,6 +43,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -67,6 +69,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import dk.foss.jarvis.BuildConfig
+import dk.foss.jarvis.wake.WakeModels
 import androidx.core.content.ContextCompat
 import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
@@ -85,6 +93,7 @@ import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -108,6 +117,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf(SettingsStore.DEFAULT_MODEL) }
     var provider by remember { mutableStateOf("") }
+    var assistantName by remember { mutableStateOf("") }
+    var savedName by remember { mutableStateOf("") } // last name the wake service was told about
     var voiceBrief by remember { mutableStateOf(true) }
     var voicePrompt by remember { mutableStateOf("") }
     var elevenKey by remember { mutableStateOf("") }
@@ -130,6 +141,14 @@ fun SettingsScreen(onBack: () -> Unit) {
     var ttsModelId by remember { mutableStateOf(LocalTtsModel.DEFAULT_ID) }
     var samplePlayer by remember { mutableStateOf<LocalTts?>(null) }
     var sttExpanded by remember { mutableStateOf(false) }
+    var wakeModelId by remember { mutableStateOf(WakeModels.DEFAULT_ID) }
+    var wakeCustomName by remember { mutableStateOf("") }
+    var wakeSensitivity by remember { mutableStateOf(1) }
+    var wakeExpanded by remember { mutableStateOf(false) }
+    var hasCustomWake by remember { mutableStateOf(WakeModels.hasCustom(context)) }
+    var wakeError by remember { mutableStateOf<String?>(null) }
+    var wakeNameDirty by remember { mutableStateOf(false) }
+    var sampleActive by remember { mutableStateOf(false) }
     var ttsExpanded by remember { mutableStateOf(false) }
     var sampleError by remember { mutableStateOf<String?>(null) }
     var overlayGranted by remember { mutableStateOf(AndroidSettings.canDrawOverlays(context)) }
@@ -173,6 +192,40 @@ fun SettingsScreen(onBack: () -> Unit) {
         store.updateConnection(baseUrl, apiKey, model, provider)
         store.updateVoice(elevenKey, elevenVoice)
         store.updateVoicePrompt(voicePrompt)
+        store.updateWakeCustomName(wakeCustomName)
+        store.updateAssistantName(assistantName)
+        val renamed = assistantName.trim().isNotEmpty() && assistantName.trim() != savedName
+        if (wakeNameDirty || renamed) { // the notification shows the name and phrase, so refresh it
+            wakeNameDirty = false
+            savedName = assistantName.trim()
+            if (wakeEnabled) WakeWordService.reload()
+        }
+    }
+
+    val wakeImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            wakeError = null
+            scope.launch {
+                val result = withContext(Dispatchers.IO) { WakeModels.importCustom(context, uri) }
+                result.fold(
+                    onSuccess = {
+                        hasCustomWake = true
+                        wakeModelId = WakeModels.CUSTOM_ID
+                        store.updateWakeModel(WakeModels.CUSTOM_ID)
+                        if (wakeEnabled) WakeWordService.reload()
+                    },
+                    onFailure = { wakeError = it.message ?: "Couldn't import that model." },
+                )
+            }
+        }
+    }
+
+    /** Save a wake choice, then restart the listener so it takes effect now. */
+    fun chooseWake(save: suspend () -> Unit) {
+        scope.launch {
+            save()
+            if (wakeEnabled) WakeWordService.reload()
+        }
     }
 
     fun enableWake() {
@@ -213,6 +266,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         apiKey = s.apiKey
         model = s.model
         provider = s.provider
+        assistantName = s.assistantName
+        savedName = s.assistantName
         voiceBrief = s.voiceBrief
         voicePrompt = s.voicePrompt
         elevenKey = s.elevenKey
@@ -222,6 +277,9 @@ fun SettingsScreen(onBack: () -> Unit) {
         sttModelId = s.localSttModel
         localTts = s.useLocalTts
         ttsModelId = s.localTtsModel
+        wakeModelId = s.wakeModel
+        wakeCustomName = s.wakeCustomName
+        wakeSensitivity = s.wakeSensitivity
         loaded = true
     }
 
@@ -249,6 +307,29 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     DisposableEffect(Unit) {
         onDispose { previewPlayer.release() }
+    }
+
+    // The wake listener hears the phone's own speaker: a sample or preview that says (or sounds like)
+    // the wake phrase would set it off. So pause it while anything plays, and re-arm after a short
+    // settle so the tail of the sound doesn't count.
+    val previewing = previewRefresh.let { previewPlayer.isLoading || previewPlayer.isPlaying }
+    val speakerActive = sampleActive || previewing
+    val wakeHeld = remember { booleanArrayOf(false) }
+    LaunchedEffect(speakerActive) {
+        if (speakerActive) {
+            WakeWordService.pauseListening()
+            wakeHeld[0] = true
+        } else if (wakeHeld[0]) {
+            delay(WAKE_REARM_MS)
+            WakeWordService.resumeListening()
+            wakeHeld[0] = false
+        }
+    }
+    LaunchedEffect(sampleActive) { // safety net: never leave the listener paused by a stuck sample
+        if (sampleActive) { delay(SAMPLE_MAX_MS); sampleActive = false }
+    }
+    DisposableEffect(Unit) {
+        onDispose { if (wakeHeld[0]) WakeWordService.resumeListening() }
     }
 
     val textFieldColors = OutlinedTextFieldDefaults.colors(
@@ -304,6 +385,26 @@ fun SettingsScreen(onBack: () -> Unit) {
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                SectionHeader("Assistant")
+                OutlinedTextField(
+                    value = assistantName,
+                    onValueChange = { assistantName = it },
+                    label = { Text("Name") },
+                    placeholder = { Text(BuildConfig.DEFAULT_ASSISTANT_NAME) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = textFieldColors,
+                )
+                Text(
+                    "What the app and its notifications call your assistant — try “Hades”. To change what " +
+                        "you say to wake it, pick a phrase under Wake word. The launcher name is fixed " +
+                        "when the app is built (JARVIS_APP_NAME in keys.properties).",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                )
+
+                SettingsDivider()
                 SectionHeader("Hermes connection")
 
                 OutlinedTextField(
@@ -682,10 +783,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 samplePlayer?.shutdown()
                                 val player = LocalTts(context, m.id)
                                 samplePlayer = player
+                                sampleActive = true
                                 player.speak(
                                     SAMPLE_TEXT,
-                                    onDone = { player.shutdown() },
-                                    onError = { sampleError = it; player.shutdown() },
+                                    onDone = { sampleActive = false; player.shutdown() },
+                                    onError = { sampleError = it; sampleActive = false; player.shutdown() },
                                 )
                             },
                         )
@@ -701,7 +803,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "\u201CHey Jarvis\u201D wake word",
+                            "Wake word",
                             fontFamily = DmSans,
                             fontWeight = FontWeight.Medium,
                             fontSize = 15.sp,
@@ -726,6 +828,35 @@ fun SettingsScreen(onBack: () -> Unit) {
                     )
                 }
 
+                WakePhraseCard(
+                    selectedId = wakeModelId,
+                    customName = wakeCustomName,
+                    hasCustom = hasCustomWake,
+                    sensitivity = wakeSensitivity,
+                    expanded = wakeExpanded,
+                    error = wakeError,
+                    textFieldColors = textFieldColors,
+                    onToggle = { wakeExpanded = !wakeExpanded },
+                    onSelect = { id ->
+                        wakeModelId = id
+                        chooseWake { store.updateWakeModel(id) }
+                    },
+                    onName = { wakeCustomName = it; wakeNameDirty = true },
+                    onImport = { wakeImportLauncher.launch(arrayOf("*/*")) },
+                    onRemove = {
+                        WakeModels.removeCustom(context)
+                        hasCustomWake = false
+                        if (wakeModelId == WakeModels.CUSTOM_ID) {
+                            wakeModelId = WakeModels.DEFAULT_ID
+                            chooseWake { store.updateWakeModel(WakeModels.DEFAULT_ID) }
+                        }
+                    },
+                    onSensitivity = { level ->
+                        wakeSensitivity = level
+                        chooseWake { store.updateWakeSensitivity(level) }
+                    },
+                )
+
                 if (wakeEnabled && !overlayGranted) {
                     NeutralButton("Allow \u201Cdisplay over other apps\u201D (needed to open on wake)") { requestOverlay() }
                 }
@@ -734,7 +865,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 Text(
-                    "Set Jarvis as your device's digital assistant to launch it with the assist gesture (long-press the power/home button).",
+                    "Set ${LocalBranding.current.name} as your device's digital assistant to launch it with the assist gesture (long-press the power/home button).",
                     fontFamily = DmSans,
                     fontSize = 13.sp,
                     color = JarvisColors.Muted,
@@ -781,6 +912,151 @@ private fun NeutralButton(text: String, onClick: () -> Unit) {
             color = JarvisColors.TextPrimary,
             modifier = Modifier.padding(vertical = 4.dp),
         )
+    }
+}
+
+/**
+ * Which phrase the always-on listener waits for: a bundled model, or one the user trained and imported
+ * (openWakeWord models are per-phrase, so "Hey Hades" needs its own trained model), plus sensitivity.
+ */
+@Composable
+private fun WakePhraseCard(
+    selectedId: String,
+    customName: String,
+    hasCustom: Boolean,
+    sensitivity: Int,
+    expanded: Boolean,
+    error: String?,
+    textFieldColors: androidx.compose.material3.TextFieldColors,
+    onToggle: () -> Unit,
+    onSelect: (String) -> Unit,
+    onName: (String) -> Unit,
+    onImport: () -> Unit,
+    onRemove: () -> Unit,
+    onSensitivity: (Int) -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    val customLabel = customName.ifBlank { "Custom wake word" }
+    val current = when {
+        selectedId == WakeModels.CUSTOM_ID && hasCustom -> customLabel
+        else -> WakeModels.bundled.firstOrNull { it.id == selectedId }?.phrase ?: WakeModels.bundled.first().phrase
+    }
+    Column(Modifier.fillMaxWidth().clip(shape).border(1.dp, JarvisColors.CyanBorder, shape)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Wake phrase", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted)
+                Text(current, fontFamily = DmSans, fontSize = 14.sp, color = JarvisColors.CyanText)
+            }
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "Hide wake phrases" else "Choose wake phrase",
+                tint = JarvisColors.Cyan,
+            )
+        }
+        if (expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                WakeChoiceRow(
+                    label = "Hey Jarvis",
+                    subtitle = null,
+                    selected = selectedId == WakeModels.DEFAULT_ID,
+                    onClick = { onSelect(WakeModels.DEFAULT_ID) },
+                )
+                WakeModels.bundled.filter { it.id != WakeModels.DEFAULT_ID }.forEach { m ->
+                    WakeChoiceRow(label = m.phrase, subtitle = null, selected = selectedId == m.id, onClick = { onSelect(m.id) })
+                }
+                WakeChoiceRow(
+                    label = if (hasCustom) customLabel else "Your own phrase…",
+                    subtitle = if (hasCustom) "Imported model" else "Import a model you trained, e.g. “Hey Hades”",
+                    selected = selectedId == WakeModels.CUSTOM_ID && hasCustom,
+                    onClick = { if (hasCustom) onSelect(WakeModels.CUSTOM_ID) else onImport() },
+                ) {
+                    RowAction(Icons.Default.Add, if (hasCustom) "Replace model" else "Import model", JarvisColors.Cyan, onImport)
+                    if (hasCustom) RowAction(Icons.Default.Delete, "Remove custom model", JarvisColors.Muted, onRemove)
+                }
+                if (hasCustom) {
+                    OutlinedTextField(
+                        value = customName,
+                        onValueChange = onName,
+                        label = { Text("Name of your phrase") },
+                        placeholder = { Text("Hey Hades") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        colors = textFieldColors,
+                    )
+                }
+                error?.let { Text(it, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.ErrorOrange) }
+                Text(
+                    "A wake phrase can't be typed in: each one is a small model trained for it. Train one " +
+                        "for any phrase (free, about an hour — see openwakeword.com/train), then import the " +
+                        ".onnx file here.",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Text(
+                    "Sensitivity: " + listOf("stricter", "normal", "more sensitive")[sensitivity.coerceIn(0, 2)],
+                    fontFamily = DmSans,
+                    fontSize = 13.sp,
+                    color = JarvisColors.TextPrimary,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                Slider(
+                    value = sensitivity.toFloat(),
+                    onValueChange = { onSensitivity(it.roundToInt()) },
+                    valueRange = 0f..2f,
+                    steps = 1,
+                    colors = SliderDefaults.colors(
+                        thumbColor = JarvisColors.Cyan,
+                        activeTrackColor = JarvisColors.Cyan,
+                        inactiveTrackColor = JarvisColors.Cyan.copy(alpha = 0.2f),
+                        activeTickColor = JarvisColors.Cyan,
+                        inactiveTickColor = JarvisColors.Cyan.copy(alpha = 0.4f),
+                    ),
+                )
+                Text(
+                    "Stricter = fewer false triggers; more sensitive = catches you from further away.",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                )
+            }
+        }
+    }
+}
+
+/** A selectable line in [WakePhraseCard]: ✓ when chosen, optional trailing actions. */
+@Composable
+private fun WakeChoiceRow(
+    label: String,
+    subtitle: String?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) JarvisColors.Cyan.copy(alpha = 0.08f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+            if (selected) Icon(Icons.Default.Check, contentDescription = "Selected", tint = JarvisColors.Cyan, modifier = Modifier.size(18.dp))
+        }
+        Column(Modifier.weight(1f).padding(start = 4.dp)) {
+            Text(label, fontFamily = DmSans, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = JarvisColors.TextPrimary)
+            subtitle?.let { Text(it, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted) }
+        }
+        actions()
     }
 }
 
@@ -954,7 +1230,10 @@ private fun RowAction(icon: ImageVector, description: String, tint: Color, onCli
     )
 }
 
-private const val SAMPLE_TEXT = "Hello, I'm Jarvis. This is how I sound with this voice."
+// Deliberately free of the wake phrase, which the listener would otherwise hear from the speaker.
+private const val SAMPLE_TEXT = "Hello, this is how I sound with this voice. Testing, one, two, three."
+private const val WAKE_REARM_MS = 800L   // settle time after playback before the wake listener re-arms
+private const val SAMPLE_MAX_MS = 30_000L
 
 /** "0.21× real time · load 2.1 s" — below 1.00× is faster than real time. */
 private fun sttDetail(t: LocalSttEngine.Timing): String? = listOfNotNull(

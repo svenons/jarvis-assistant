@@ -65,6 +65,7 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     val messages = vm.messages
     val streaming by vm.isStreaming
+    val name = LocalBranding.current.name
     val tools = vm.tools
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.text, tools.size) {
@@ -81,7 +82,7 @@ fun ChatScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             JarvisMark()
                             Text(
-                                "Jarvis",
+                                name,
                                 fontFamily = SpaceGrotesk,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.padding(start = 10.dp),
@@ -125,7 +126,7 @@ fun ChatScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "Ask Jarvis anything",
+                            "Ask $name anything",
                             fontFamily = SpaceGrotesk,
                             fontWeight = FontWeight.Medium,
                             fontSize = 18.sp,
@@ -242,7 +243,7 @@ private fun InputBar(
                 modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
-                        "Message Jarvis",
+                        "Message ${LocalBranding.current.name}",
                         fontFamily = DmSans,
                         color = JarvisColors.Muted,
                     )

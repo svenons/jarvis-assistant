@@ -3,11 +3,13 @@ package dk.foss.jarvis.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dk.foss.jarvis.BuildConfig
 import dk.foss.jarvis.voice.LocalSttModel
 import dk.foss.jarvis.voice.LocalTtsModel
+import dk.foss.jarvis.wake.WakeModels
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -35,6 +37,14 @@ data class JarvisSettings(
     val voiceBrief: Boolean = true,
     /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
     val voicePrompt: String = "",
+    /** Which wake phrase to listen for: a bundled [dk.foss.jarvis.wake.WakeModel] id, or `custom`. */
+    val wakeModel: String = WakeModels.DEFAULT_ID,
+    /** What to call the imported custom wake model (e.g. "Hey Hades"); shown in the notification. */
+    val wakeCustomName: String = "",
+    /** 0 = stricter (fewer false triggers), 1 = normal, 2 = more sensitive. */
+    val wakeSensitivity: Int = 1,
+    /** What the assistant is called in the app and its notifications (never blank). */
+    val assistantName: String = BuildConfig.DEFAULT_ASSISTANT_NAME,
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotEmpty() && apiKey.isNotEmpty()
     val useElevenLabs: Boolean get() = elevenKey.isNotEmpty() && elevenVoiceId.isNotEmpty()
@@ -60,6 +70,10 @@ class SettingsStore(private val context: Context) {
         val LOCAL_TTS_MODEL = stringPreferencesKey("local_tts_model")
         val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
+        val WAKE_MODEL = stringPreferencesKey("wake_model")
+        val WAKE_CUSTOM_NAME = stringPreferencesKey("wake_custom_name")
+        val WAKE_SENSITIVITY = intPreferencesKey("wake_sensitivity")
+        val ASSISTANT_NAME = stringPreferencesKey("assistant_name")
     }
 
     val settings: Flow<JarvisSettings> = context.dataStore.data.map { p ->
@@ -81,6 +95,10 @@ class SettingsStore(private val context: Context) {
             localTtsModel = LocalTtsModel.byId(p[Keys.LOCAL_TTS_MODEL] ?: "").id,
             voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
+            wakeModel = p[Keys.WAKE_MODEL] ?: WakeModels.DEFAULT_ID,
+            wakeCustomName = p[Keys.WAKE_CUSTOM_NAME] ?: "",
+            wakeSensitivity = (p[Keys.WAKE_SENSITIVITY] ?: 1).coerceIn(0, 2),
+            assistantName = (p[Keys.ASSISTANT_NAME] ?: "").ifBlank { BuildConfig.DEFAULT_ASSISTANT_NAME },
         )
     }
 
@@ -102,6 +120,22 @@ class SettingsStore(private val context: Context) {
 
     suspend fun updateLocalTtsModel(id: String) {
         context.dataStore.edit { p -> p[Keys.LOCAL_TTS_MODEL] = id }
+    }
+
+    suspend fun updateAssistantName(name: String) {
+        context.dataStore.edit { p -> p[Keys.ASSISTANT_NAME] = name.trim() }
+    }
+
+    suspend fun updateWakeModel(id: String) {
+        context.dataStore.edit { p -> p[Keys.WAKE_MODEL] = id }
+    }
+
+    suspend fun updateWakeCustomName(name: String) {
+        context.dataStore.edit { p -> p[Keys.WAKE_CUSTOM_NAME] = name.trim() }
+    }
+
+    suspend fun updateWakeSensitivity(level: Int) {
+        context.dataStore.edit { p -> p[Keys.WAKE_SENSITIVITY] = level.coerceIn(0, 2) }
     }
 
     suspend fun updateVoiceBrief(enabled: Boolean) {

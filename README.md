@@ -15,8 +15,9 @@ sidecar — point it at your Hermes URL + API key and go.
 
 - 💬 **Streaming chat** with your Hermes agent (continuous sessions via `X-Hermes-Session-Id`).
 - 🎙️ **Voice conversation mode** — speak, Jarvis thinks and replies aloud, then listens again.
-- 🗣️ **"Hey Jarvis" wake word** — fully on-device ([openWakeWord](https://github.com/dscripka/openWakeWord)), no cloud, no account.
+- 🗣️ **Wake word** ("Hey Jarvis", or your own trained phrase) — fully on-device ([openWakeWord](https://github.com/dscripka/openWakeWord)), no cloud, no account.
 - 🤖 **Default digital assistant** — launch with the long-press / assist gesture, replacing Gemini.
+- 🏷️ **Your assistant's name** — call it Hades (or anything): the app, its notifications and, with an imported wake phrase, what you say to it.
 - 🛠️ **See what the agent is doing** — the tools Hermes runs (its `hermes.tool.progress` events) are listed on screen in chat and voice mode, never read aloud.
 - 🤏 **Speakable answers** — voice turns carry a short system instruction so Hermes says the result ("lights are off in the kitchen and hallway"), not the process. On by default; editable under *Spoken replies*.
 - 🔊 **Pluggable voice** — your phone's built-in TTS by default; optional **ElevenLabs** for premium speech.
@@ -42,7 +43,7 @@ Or copy the APK to the phone and tap it (allow "install from unknown sources").
 3. **API key** — your Hermes `API_SERVER_KEY` (in Hermes' `.env`). Tap **Save & test connection** — you should see your models.
    The **Model** field is only honoured by Hermes if you also set **Provider** (e.g. `minimax`), or enable `gateway.platforms.api_server.direct_model_requests: true` on the Hermes server; otherwise Hermes uses the model it is configured with and ignores this field.
 4. **Set as default assistant** (optional) — opens system settings; pick Jarvis so the assist gesture launches it.
-5. **"Hey Jarvis" wake word** (optional) — toggle on and grant microphone + notification permissions. A persistent notification shows while it listens.
+5. **"Hey Jarvis" wake word** (optional) — toggle on and grant microphone + notification permissions. A persistent notification shows while it listens. Under *Wake phrase* you can pick another bundled model, set the **sensitivity**, or **import your own** phrase (e.g. "Hey Hades"): each phrase is a small [openWakeWord](https://github.com/dscripka/openWakeWord) model, so train one (free, about an hour — see [openwakeword.com/train](https://openwakeword.com/train) or the project's training notebook) and import the `.onnx` file. Sounds played by the app itself (voice samples, previews) pause the listener so they can't trigger it.
 6. **ElevenLabs** (optional) — paste an ElevenLabs API key + voice ID for premium speech; otherwise the phone's built-in voice is used.
 7. **On-device speech recognition** (optional, needed on GrapheneOS) — under *On-device speech → Listening*, open the model list and **Download** one or more models (Moonshine, Whisper or Parakeet; from ~125 MB to ~660 MB, resumable), pick one, and switch on **Use on-device recognition**. Speech is then transcribed on the phone — no network, no Google speech service — and it never falls back to a cloud STT. After a few conversations each model row shows its measured speed on your phone, so you can compare.
 8. **On-device voice** (optional, needed on GrapheneOS) — under *On-device speech → Speaking*, tap the model row to open the list, **Download** a voice (Supertonic, Piper, Kitten or Kokoro; ~21–105 MB), tap ▶ to hear and time it, pick one, and switch the row on. Supertonic is the fastest in desktop testing; Kokoro sounds best but may not keep up in real time on a phone. Replies are then spoken by the phone itself, with no network and no system text-to-speech engine.
@@ -150,6 +151,11 @@ Notes:
   gitignored `keys.properties` (`JARVIS_BASE_URL`, `JARVIS_API_KEY`,
   `JARVIS_ELEVEN_KEY`, `JARVIS_ELEVEN_VOICE`). Without it you enter these in
   Settings (see [First-run setup](#first-run-setup)).
+- **Rename the assistant.** In the app, *Settings → Assistant → Name* changes what the screens and
+  notifications call it (e.g. "Hades"). The launcher / app-switcher name and the entry in Android's assistant
+  picker are fixed when the app is built: set `JARVIS_APP_NAME=Hades` in `keys.properties` and rebuild (that
+  also becomes the default in-app name). To *say* a different name, pick or import a matching wake phrase
+  under *Wake word*.
 
 ### Troubleshooting
 
