@@ -58,7 +58,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             isStreaming.value = true
 
             val client = HermesClient(s.baseUrl, s.apiKey)
-            currentSource = client.streamChat(history, s.model, repo.sessionId, object : HermesClient.StreamCallbacks {
+            currentSource = client.streamChat(history, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
                 override fun onDelta(textDelta: String) = onMain {
                     repo.appendToMessage(assistantIndex, textDelta)
                 }

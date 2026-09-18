@@ -21,7 +21,8 @@ class HermesClient(
     private val baseUrl: String,
     private val apiKey: String,
 ) {
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    // explicitNulls=false: an unset `provider` must be omitted from the request, not sent as null.
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
     interface StreamCallbacks {
         fun onDelta(textDelta: String)
@@ -33,12 +34,13 @@ class HermesClient(
     fun streamChat(
         messages: List<ChatMessage>,
         model: String,
+        provider: String?,
         sessionId: String?,
         cb: StreamCallbacks,
     ): EventSource {
         val body = json.encodeToString(
             ChatRequest.serializer(),
-            ChatRequest(model = model, messages = messages, stream = true),
+            ChatRequest(model = model, messages = messages, stream = true, provider = provider?.ifBlank { null }),
         )
         val builder = Request.Builder()
             .url("$baseUrl/v1/chat/completions")

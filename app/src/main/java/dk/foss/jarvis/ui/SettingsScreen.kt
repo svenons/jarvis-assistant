@@ -12,6 +12,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,18 +34,23 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +59,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -66,6 +73,14 @@ import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
 import dk.foss.jarvis.voice.ElevenLabsVoices
 import dk.foss.jarvis.voice.ElevenVoice
+import dk.foss.jarvis.voice.LocalSttEngine
+import dk.foss.jarvis.voice.LocalSttModel
+import dk.foss.jarvis.voice.LocalSttStore
+import dk.foss.jarvis.voice.LocalTts
+import dk.foss.jarvis.voice.LocalTtsEngine
+import dk.foss.jarvis.voice.LocalTtsModel
+import dk.foss.jarvis.voice.LocalTtsStore
+import dk.foss.jarvis.voice.ModelState
 import dk.foss.jarvis.voice.VoicePreviewPlayer
 import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
@@ -85,6 +100,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf(SettingsStore.DEFAULT_MODEL) }
+    var provider by remember { mutableStateOf("") }
     var elevenKey by remember { mutableStateOf("") }
     var elevenVoice by remember { mutableStateOf(SettingsStore.DEFAULT_ELEVEN_VOICE) }
     fun isBatteryExempt(): Boolean {
@@ -93,6 +109,18 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 
     var wakeEnabled by remember { mutableStateOf(false) }
+    var localStt by remember { mutableStateOf(false) }
+    val sttStore = remember { LocalSttStore.get(context) }
+    val sttStates by sttStore.states.collectAsState()
+    val sttTimings by LocalSttEngine.timings.collectAsState()
+    var sttModelId by remember { mutableStateOf(LocalSttModel.DEFAULT_ID) }
+    var localTts by remember { mutableStateOf(false) }
+    val ttsStore = remember { LocalTtsStore.get(context) }
+    val ttsStates by ttsStore.states.collectAsState()
+    val ttsTimings by LocalTtsEngine.timings.collectAsState()
+    var ttsModelId by remember { mutableStateOf(LocalTtsModel.DEFAULT_ID) }
+    var samplePlayer by remember { mutableStateOf<LocalTts?>(null) }
+    var sampleError by remember { mutableStateOf<String?>(null) }
     var overlayGranted by remember { mutableStateOf(AndroidSettings.canDrawOverlays(context)) }
     var batteryExempt by remember { mutableStateOf(isBatteryExempt()) }
     var loaded by remember { mutableStateOf(false) }
@@ -131,7 +159,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 
     suspend fun persist() {
-        store.updateConnection(baseUrl, apiKey, model)
+        store.updateConnection(baseUrl, apiKey, model, provider)
         store.updateVoice(elevenKey, elevenVoice)
     }
 
@@ -172,9 +200,14 @@ fun SettingsScreen(onBack: () -> Unit) {
         baseUrl = s.baseUrl
         apiKey = s.apiKey
         model = s.model
+        provider = s.provider
         elevenKey = s.elevenKey
         elevenVoice = s.elevenVoiceId
         wakeEnabled = s.wakeEnabled
+        localStt = s.useLocalStt
+        sttModelId = s.localSttModel
+        localTts = s.useLocalTts
+        ttsModelId = s.localTtsModel
         loaded = true
     }
 
@@ -194,6 +227,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                 onFailure = { voicesError = it.message ?: "Failed to load voices" },
             )
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { samplePlayer?.shutdown() }
     }
 
     DisposableEffect(Unit) {
@@ -281,6 +318,22 @@ fun SettingsScreen(onBack: () -> Unit) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = textFieldColors,
+                )
+                OutlinedTextField(
+                    value = provider,
+                    onValueChange = { provider = it },
+                    label = { Text("Provider (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = textFieldColors,
+                )
+                Text(
+                    "Hermes ignores the model above unless a provider is sent with it (e.g. minimax) " +
+                        "or the server sets gateway.platforms.api_server.direct_model_requests: true. " +
+                        "Leave blank to use the model your Hermes is configured with.",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
                 )
 
                 PillButton(
@@ -484,6 +537,160 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 SettingsDivider()
+                SectionHeader("On-device speech recognition")
+                Text(
+                    "Transcribes your voice on the phone — no network and no Google speech service, " +
+                        "so it works on GrapheneOS. Download one or more models, pick one, and compare " +
+                        "the measured speed on your phone.",
+                    fontFamily = DmSans,
+                    fontSize = 13.sp,
+                    color = JarvisColors.Muted,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Use on-device recognition",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "Overrides ElevenLabs Scribe and never falls back to a cloud service.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = localStt,
+                        onCheckedChange = {
+                            localStt = it
+                            scope.launch { store.updateLocalStt(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+                sttStore.models.forEach { m ->
+                    ModelRow(
+                        label = m.label,
+                        blurb = m.blurb,
+                        sizeMb = m.totalBytes / 1_000_000,
+                        state = sttStates[m.id] ?: ModelState.Missing,
+                        selected = m.id == sttModelId,
+                        detail = sttTimings[m.id]?.let { sttDetail(it) },
+                        onSelect = {
+                            sttModelId = m.id
+                            scope.launch { store.updateLocalSttModel(m.id) }
+                        },
+                        onDownload = { sttStore.download(m) },
+                        onCancel = { sttStore.cancel(m) },
+                        onDelete = { sttStore.delete(m) },
+                    )
+                }
+                if (localStt && sttStates[sttModelId] !is ModelState.Ready) {
+                    Text(
+                        "The selected model isn’t downloaded yet — voice input will report an error until it is.",
+                        fontFamily = DmSans,
+                        fontSize = 13.sp,
+                        color = JarvisColors.ErrorOrange,
+                    )
+                }
+                Text(
+                    "Speed is measured on your phone from real conversations: “x real time” below 1.00 " +
+                        "means it transcribes faster than you speak. A model change applies from the next conversation.",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                )
+
+                SettingsDivider()
+                SectionHeader("On-device voice")
+                Text(
+                    "Speaks replies with a voice model on the phone — no network and no system " +
+                        "text-to-speech engine, so it works on GrapheneOS. Download one or more voices, " +
+                        "pick one, and use Play sample to hear and time each.",
+                    fontFamily = DmSans,
+                    fontSize = 13.sp,
+                    color = JarvisColors.Muted,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Use on-device voice",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "Overrides ElevenLabs and the system voice for replies.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = localTts,
+                        onCheckedChange = {
+                            localTts = it
+                            scope.launch { store.updateLocalTts(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+                ttsStore.models.forEach { m ->
+                    ModelRow(
+                        label = m.label,
+                        blurb = m.blurb,
+                        sizeMb = m.archiveBytes / 1_000_000,
+                        state = ttsStates[m.id] ?: ModelState.Missing,
+                        selected = m.id == ttsModelId,
+                        detail = ttsTimings[m.id]?.let { ttsDetail(it) },
+                        onSelect = {
+                            ttsModelId = m.id
+                            scope.launch { store.updateLocalTtsModel(m.id) }
+                        },
+                        onDownload = { ttsStore.download(m) },
+                        onCancel = { ttsStore.cancel(m) },
+                        onDelete = { ttsStore.delete(m) },
+                        onSample = {
+                            sampleError = null
+                            samplePlayer?.shutdown()
+                            val player = LocalTts(context, m.id)
+                            samplePlayer = player
+                            player.speak(
+                                SAMPLE_TEXT,
+                                onDone = { player.shutdown() },
+                                onError = { sampleError = it; player.shutdown() },
+                            )
+                        },
+                    )
+                }
+                sampleError?.let {
+                    Text(it, fontFamily = DmSans, fontSize = 13.sp, color = JarvisColors.ErrorOrange)
+                }
+                if (localTts && ttsStates[ttsModelId] !is ModelState.Ready) {
+                    Text(
+                        "The selected voice isn’t downloaded yet — replies fall back to the system voice, " +
+                            "which GrapheneOS may not have.",
+                        fontFamily = DmSans,
+                        fontSize = 13.sp,
+                        color = JarvisColors.ErrorOrange,
+                    )
+                }
+
+                SettingsDivider()
                 SectionHeader("System integration")
 
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -571,6 +778,140 @@ private fun NeutralButton(text: String, onClick: () -> Unit) {
         )
     }
 }
+
+@Composable
+private fun ModelRow(
+    label: String,
+    blurb: String,
+    sizeMb: Long,
+    state: ModelState,
+    selected: Boolean,
+    /** Measured speed, shown once the model is ready and has been used. */
+    detail: String?,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+    onSample: (() -> Unit)? = null,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .border(1.dp, if (selected) JarvisColors.Cyan.copy(alpha = 0.6f) else JarvisColors.CyanBorder, shape)
+            .clickable(onClick = onSelect)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(
+                selected = selected,
+                onClick = onSelect,
+                colors = RadioButtonDefaults.colors(
+                    selectedColor = JarvisColors.Cyan,
+                    unselectedColor = JarvisColors.Muted,
+                ),
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    label,
+                    fontFamily = DmSans,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 15.sp,
+                    color = JarvisColors.TextPrimary,
+                )
+                Text(blurb, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted)
+            }
+        }
+        when (state) {
+            is ModelState.Ready -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Ready · $sizeMb MB",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.CyanText,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (onSample != null) {
+                        TextButton(onClick = onSample) { Text("Play sample", fontFamily = DmSans, color = JarvisColors.Cyan) }
+                    }
+                    TextButton(onClick = onDelete) { Text("Delete", fontFamily = DmSans, color = JarvisColors.Muted) }
+                }
+                detail?.let { Text(it, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextPrimary) }
+            }
+            is ModelState.Downloading -> {
+                Text(
+                    "Downloading… ${state.doneBytes / 1_000_000} / ${state.totalBytes / 1_000_000} MB",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.TextPrimary,
+                )
+                LinearProgressIndicator(
+                    progress = { state.doneBytes.toFloat() / state.totalBytes },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = JarvisColors.Cyan,
+                    trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
+                )
+                TextButton(onClick = onCancel) { Text("Cancel", fontFamily = DmSans, color = JarvisColors.Muted) }
+            }
+            is ModelState.Installing -> {
+                val pct = if (state.totalBytes > 0) (state.doneBytes * 100 / state.totalBytes).toInt() else 0
+                Text(
+                    "Unpacking… $pct% \u00B7 one-time step, bigger voices take a few minutes",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.TextPrimary,
+                )
+                LinearProgressIndicator(
+                    progress = { state.doneBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = JarvisColors.Cyan,
+                    trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
+                )
+                TextButton(onClick = onCancel) { Text("Cancel", fontFamily = DmSans, color = JarvisColors.Muted) }
+            }
+            is ModelState.Failed -> {
+                Text(state.message, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.ErrorOrange)
+                TextButton(onClick = onDownload) { Text("Retry download", fontFamily = DmSans, color = JarvisColors.Cyan) }
+            }
+            is ModelState.Missing -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "$sizeMb MB · not downloaded",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Muted,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onDownload) { Text("Download", fontFamily = DmSans, color = JarvisColors.Cyan) }
+                }
+            }
+        }
+    }
+}
+
+private const val SAMPLE_TEXT = "Hello, I'm Jarvis. This is how I sound with this voice."
+
+/** "Last: 4.2 s of speech in 0.9 s (0.21× real time) · load 2.1 s" — below 1.00× is faster than real time. */
+private fun sttDetail(t: LocalSttEngine.Timing): String? = listOfNotNull(
+    if (t.audioMs > 0) {
+        "Last: %.1f s of speech in %.1f s (%.2f× real time)"
+            .format(t.audioMs / 1000.0, t.decodeMs / 1000.0, t.decodeMs.toDouble() / t.audioMs)
+    } else null,
+    if (t.loadMs > 0) "load %.1f s".format(t.loadMs / 1000.0) else null,
+).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
+/** Same idea for a voice, plus how long until the first sound. */
+private fun ttsDetail(t: LocalTtsEngine.Timing): String? = listOfNotNull(
+    if (t.audioMs > 0) {
+        "Last: %.1f s of speech in %.1f s (%.2f× real time)"
+            .format(t.audioMs / 1000.0, t.genMs / 1000.0, t.genMs.toDouble() / t.audioMs)
+    } else null,
+    if (t.firstAudioMs > 0) "first sound after %.1f s".format(t.firstAudioMs / 1000.0) else null,
+    if (t.loadMs > 0) "load %.1f s".format(t.loadMs / 1000.0) else null,
+).takeIf { it.isNotEmpty() }?.joinToString(" · ")
 
 private fun openAssistantSettings(context: Context) {
     val intent = Intent(AndroidSettings.ACTION_VOICE_INPUT_SETTINGS)

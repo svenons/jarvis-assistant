@@ -12,6 +12,8 @@ import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
 import dk.foss.jarvis.voice.AndroidTts
 import dk.foss.jarvis.voice.ElevenLabsTts
+import dk.foss.jarvis.voice.LocalRecognizer
+import dk.foss.jarvis.voice.LocalTts
 import dk.foss.jarvis.voice.ScribeRecognizer
 import dk.foss.jarvis.voice.SpeechInput
 import dk.foss.jarvis.voice.TtsEngine
@@ -50,6 +52,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var settings: JarvisSettings? = null
     private var tts: TtsEngine? = null
     private var androidFallback: AndroidTts? = null
+    private var builtTtsChoice: String? = null // which voice `tts` was built for
     private var source: EventSource? = null
     private var continuous = true
 
@@ -80,20 +83,34 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun ensureReady() {
-        val s = settings ?: settingsStore.settings.first().also { settings = it }
-        if (tts == null) {
-            tts = if (s.useElevenLabs) {
-                ElevenLabsTts(getApplication(), s.elevenKey, s.elevenVoiceId)
-            } else {
-                AndroidTts(getApplication(), languageTag = null)
-            }
+        // stopAll() drops the recognizer, so a null one marks the start of a conversation:
+        // re-read settings then, so changes made in Settings apply without an app restart.
+        val s = settings.takeIf { recognizer != null }
+            ?: settingsStore.settings.first().also { settings = it }
+
+        // Rebuild the voice if the choice changed since it was built (nothing is speaking here).
+        val ttsChoice = when {
+            s.useLocalTts -> "local:${s.localTtsModel}" // explicit on-device choice: never a cloud voice
+            s.useElevenLabs -> "eleven:${s.elevenKey}:${s.elevenVoiceId}"
+            else -> "android"
         }
+        if (tts == null || ttsChoice != builtTtsChoice) {
+            tts?.shutdown()
+            tts = when {
+                s.useLocalTts -> LocalTts(getApplication(), s.localTtsModel)
+                s.useElevenLabs -> ElevenLabsTts(getApplication(), s.elevenKey, s.elevenVoiceId)
+                else -> AndroidTts(getApplication(), languageTag = null)
+            }
+            builtTtsChoice = ttsChoice
+        }
+
         if (recognizer == null) {
-            // With an ElevenLabs key, use Scribe (far better accuracy); else on-device.
-            recognizer = if (s.useElevenLabs) {
-                ScribeRecognizer(getApplication(), s.elevenKey, languageCode = null)
-            } else {
-                SpeechInput(getApplication())
+            recognizer = when {
+                // Explicit choice: never fall back to a cloud STT (a missing model is reported instead).
+                s.useLocalStt -> LocalRecognizer(getApplication(), s.localSttModel)
+                // With an ElevenLabs key, use Scribe (far better accuracy); else Android's recognizer.
+                s.useElevenLabs -> ScribeRecognizer(getApplication(), s.elevenKey, languageCode = null)
+                else -> SpeechInput(getApplication())
             }
             recognizer?.prewarm()
         }
@@ -218,7 +235,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
         val s = settings ?: return
         val client = HermesClient(s.baseUrl, s.apiKey)
-        source = client.streamChat(requestHistory, s.model, repo.sessionId, object : HermesClient.StreamCallbacks {
+        source = client.streamChat(requestHistory, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
             override fun onDelta(textDelta: String) = onMain {
                 if (turn == myTurn) onTextDelta(textDelta)
             }

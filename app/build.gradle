@@ -67,6 +67,42 @@ android {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
+        jniLibs {
+            // ARM-only (see abiFilters). The sherpa AAR ships an x86 libonnxruntime.so that
+            // collides with onnxruntime-android's; the ARM libs don't collide, so drop x86.
+            excludes += ['lib/x86/**', 'lib/x86_64/**']
+        }
+    }
+}
+
+// sherpa-onnx (on-device speech recognition). We use the official *static-link* AAR: it
+// bundles ONNX Runtime inside libsherpa-onnx-jni.so, so it can't clash with the separate
+// libonnxruntime.so that xyz.rementia:openwakeword brings in. It's 38 MB, so it is fetched
+// at build time into app/libs (gitignored) and checked against a pinned SHA-256.
+def sherpaVersion = '1.13.8'
+def sherpaSha256 = 'b22c3fc1b6a45666d28892bb2f7694beeb77a8362d7ebd77c1a5431ec9435471'
+def sherpaAar = file("libs/sherpa-onnx-static-link-onnxruntime-${sherpaVersion}.aar")
+def sha256Of = { File f ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    f.withInputStream { s ->
+        byte[] buf = new byte[65536]
+        int n
+        while ((n = s.read(buf)) > 0) md.update(buf, 0, n)
+    }
+    md.digest().collect { String.format('%02x', it) }.join()
+}
+tasks.register('fetchSherpaOnnx') {
+    outputs.file(sherpaAar)
+    doLast {
+        if (!sherpaAar.exists() || sha256Of(sherpaAar) != sherpaSha256) {
+            sherpaAar.parentFile.mkdirs()
+            def url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/${sherpaAar.name}"
+            new URL(url).withInputStream { i -> sherpaAar.withOutputStream { o -> o << i } }
+            if (sha256Of(sherpaAar) != sherpaSha256) {
+                sherpaAar.delete()
+                throw new GradleException("Checksum mismatch for ${sherpaAar.name}; refusing to use it")
+            }
+        }
     }
 }
 
@@ -87,6 +123,8 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'xyz.rementia:openwakeword:0.1.5' // wake word (package com.rementia.openwakeword.lib)
+    implementation(files(sherpaAar) { builtBy 'fetchSherpaOnnx' }) // on-device STT + TTS (package com.k2fsa.sherpa.onnx)
+    implementation 'org.apache.commons:commons-compress:1.28.0' // unpacks the .tar.bz2 TTS voice archives
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
 }

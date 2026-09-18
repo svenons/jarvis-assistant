@@ -73,17 +73,24 @@ mechanism behind an interface.
 | Wire protocol | `hermes/HermesClient.kt`, `hermes/Models.kt` | **Only** Hermes coupling. OkHttp SSE → `/v1/chat/completions`; `/v1/models` for the connection test. |
 | Shared HTTP | `net/Http.kt` | `Http.base` (bounded timeouts) + `Http.streaming` (`readTimeout(0)` for SSE, derived from `base`). Reuse these — never build a new `OkHttpClient`. |
 | Persistence | `data/SettingsStore.kt` (DataStore prefs), `data/ConversationStore.kt` (one JSON file per conversation), `data/ConversationRepository.kt` (singleton source of truth) | Settings = DataStore; conversations = `filesDir/conversations/<id>.json`. Don't mix. |
-| STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs) | Two backends behind one interface. |
-| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium) | Two backends behind one interface. |
+| STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs), `voice/LocalRecognizer.kt` + `voice/LocalSttModel.kt` (fully on-device, sherpa-onnx; catalog of Moonshine / Whisper / Parakeet models) | Three backends behind one interface. |
+| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium), `voice/LocalTts.kt` (on-device sherpa-onnx voices: Kitten / Piper / Kokoro) | Three backends behind one interface. |
+| Model downloads | `voice/ModelStore.kt` | Shared base for `LocalSttStore` / `LocalTtsStore`: resumable, SHA-256-verified downloads + per-model `ModelState`. |
 | Voice loop | `ui/ConversationViewModel.kt` | `ConvState` Idle→Listening→Thinking→Speaking; recognition, streaming, sentence extraction, single-flight TTS pump, turn invalidation, wake re-arm. |
 | Wake word | `wake/WakeWordService.kt`, `wake/BootReceiver.kt` | openWakeWord foreground mic service; launches the app on "Hey Jarvis". |
 | Assistant integration | `assist/JarvisInteractionService.kt`, `JarvisInteractionSessionService.kt`, `JarvisInteractionSession.kt`, `JarvisRecognitionService.kt` | `VoiceInteractionService` so Jarvis can be the default assistant. |
 | UI / design | `MainActivity.kt`, `ui/*Screen.kt`, `ui/Theme.kt`, `ui/JarvisDesign.kt` | Compose screens + the "Direction A" design system. |
 
-**Backend selection:** a single flag — `settings.useElevenLabs` (true when an
-ElevenLabs key + voice id are set) — picks `ScribeRecognizer`+`ElevenLabsTts`,
-else `SpeechInput`+`AndroidTts`. New voice backends plug into the
-`VoiceRecognizer`/`TtsEngine` interfaces, never bypass them.
+**Backend selection:** `settings.useElevenLabs` (true when an ElevenLabs key +
+voice id are set) picks `ScribeRecognizer`+`ElevenLabsTts`, else
+`SpeechInput`+`AndroidTts`. On top of that, `settings.useLocalStt` (Settings →
+"On-device speech recognition") forces `LocalRecognizer` for STT and **never falls
+back to a cloud STT** — if the model isn't downloaded it reports an error instead —
+and `settings.useLocalTts` forces `LocalTts` for replies (a missing voice falls back
+to `AndroidTts` per sentence, like any premium-TTS failure). `localSttModel` /
+`localTtsModel` pick the entry from the `LocalSttModel.all` / `LocalTtsModel.all`
+catalogs. Both are chosen in `ConversationViewModel.ensureReady`. New voice backends
+plug into the `VoiceRecognizer`/`TtsEngine` interfaces, never bypass them.
 
 **Navigation:** no nav library. `MainActivity` has `private enum Screen { Chat,
 Settings, Conversation, History }` in a remembered `mutableStateOf`. An assist or
@@ -177,6 +184,46 @@ screens add `BackHandler { screen = Chat }`.
   the full mp3 to `cacheDir` before `MediaPlayer` playback.
 - **Reuse one `SpeechRecognizer` instance** across turns; create/destroy churn
   triggers `ERROR_SERVER_DISCONNECTED` (code 11).
+- **Local STT = sherpa-onnx, fetched at build time.** `app/build.gradle` downloads the
+  official *static-link* AAR into `app/libs/` (gitignored) and verifies a pinned
+  SHA-256 (`fetchSherpaOnnx`). Use the static-link build: it has ONNX Runtime inside
+  `libsherpa-onnx-jni.so`, so it doesn't clash with openwakeword's `libonnxruntime.so`.
+  Don't switch to the JitPack coordinate (it re-publishes the non-static AAR plus desktop
+  native jars). x86/x86_64 native libs are excluded in `packaging.jniLibs` because the AAR's
+  x86 `libonnxruntime.so` collides — the app is ARM-only anyway.
+- **Local models are downloaded at runtime, never bundled** (the APK is already ~150 MB).
+  STT models (`LocalSttStore`, `filesDir/models/<id>/`) are individual files from a *pinned*
+  Hugging Face revision, each with a SHA-256; the biggest (Parakeet, encoder 652 MB) is
+  ~660 MB. TTS voices (`LocalTtsStore`, `filesDir/tts/<id>/content/`) are one `.tar.bz2` from
+  the sherpa-onnx `tts-models` release (pinned to GitHub's own asset `digest`), unpacked with
+  commons-compress behind a path-traversal guard; a `.complete` marker is written last.
+  Add a model = one catalog entry (verify the file layout and hashes first; several
+  `csukuangfj/...` HF repos are empty — those models only exist as release tarballs).
+  Model ids double as folder names and are persisted in settings: don't rename them.
+- **Hermes ignores a bare `model`.** On `/v1/chat/completions` the Hermes api_server only honours
+  the request's `model` if the request also carries a `provider`, or the server has
+  `gateway.platforms.api_server.direct_model_requests: true` (see Hermes docs, "Per-request model
+  selection"). So the Settings "Provider (optional)" field is sent alongside `model`
+  (`ChatRequest.provider`, omitted when blank — `HermesClient`'s Json has `explicitNulls = false`).
+  `/v1/models` only advertises the profile name, so it can't be used to list selectable models.
+- **TTS voice install is slow, not stuck.** Voices are `.tar.bz2` and bzip2 is decoded in pure Java
+  (CPU-bound: ~5 s per 67 MB on a fast desktop, several times that on a phone, more in a debug
+  build; Kokoro is 320 MB). `ModelState.Installing` carries progress for that reason — keep the
+  progress reporting if you touch `unpack`. Input buffering makes no measurable difference.
+- **`LocalSttEngine` / `LocalTtsEngine`** keep one model loaded across conversations and free
+  it after 5 idle minutes; switching models frees the old one first. All native access is under
+  one lock because releasing during a decode crashes. They also record load/decode timings,
+  which Settings shows so models can be compared on the real device.
+- **`LocalTts` streams into an `AudioTrack`** and must `play()` before writing — a blocking write
+  to a stopped `MODE_STREAM` track never returns. `stop()` does `pause()+flush()+release()` so a
+  writer blocked on a full buffer is released. It pre-buffers ~0.6 s so a slow voice doesn't stutter.
+- **espeak-ng is GPL-3.0 and is statically inside `libsherpa-onnx-jni.so`** (the Piper/Kokoro/Kitten
+  voices need it; the voice archives also ship its `espeak-ng-data`). Distributing this APK
+  (e.g. in `dist/`) therefore has GPL implications for an otherwise Apache-2.0 project — sort
+  that out before publishing a build.
+- **`ConversationViewModel.settings` is cached**, but `ensureReady` re-reads it at the start of
+  each conversation (when `recognizer` is null, since `stopAll` drops it), and rebuilds the TTS
+  engine if the voice choice changed.
 - **`extractSentences` only splits on `.`/`!`/`?` when followed by whitespace**
   (so `3.5` and trailing mid-stream `.` aren't split) plus a soft cap at 180 chars.
   `flushPendingSentence` (idle flush) only speaks a buffered sentence if it already

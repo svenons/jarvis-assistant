@@ -10,6 +10,8 @@ data class ChatRequest(
     val model: String,
     val messages: List<ChatMessage>,
     val stream: Boolean = true,
+    /** Hermes provider slug. Without it, Hermes ignores `model` unless direct_model_requests is on. */
+    val provider: String? = null,
 )
 
 // --- streaming response (OpenAI chat.completion.chunk) ---

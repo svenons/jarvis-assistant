@@ -38,22 +38,123 @@ Or copy the APK to the phone and tap it (allow "install from unknown sources").
 1. **Open Jarvis → ⚙ Settings.**
 2. **Base URL** — your Hermes `api_server`, e.g. `http://100.x.x.x:8642` (Tailscale) or `http://<lan-ip>:8642`.
 3. **API key** — your Hermes `API_SERVER_KEY` (in Hermes' `.env`). Tap **Save & test connection** — you should see your models.
+   The **Model** field is only honoured by Hermes if you also set **Provider** (e.g. `minimax`), or enable `gateway.platforms.api_server.direct_model_requests: true` on the Hermes server; otherwise Hermes uses the model it is configured with and ignores this field.
 4. **Set as default assistant** (optional) — opens system settings; pick Jarvis so the assist gesture launches it.
 5. **"Hey Jarvis" wake word** (optional) — toggle on and grant microphone + notification permissions. A persistent notification shows while it listens.
 6. **ElevenLabs** (optional) — paste an ElevenLabs API key + voice ID for premium speech; otherwise the phone's built-in voice is used.
+7. **On-device speech recognition** (optional, needed on GrapheneOS) — under *On-device speech recognition*, **Download** one or more models (Moonshine, Whisper or Parakeet; from ~125 MB to ~660 MB, resumable), pick one, and switch on **Use on-device recognition**. Speech is then transcribed on the phone — no network, no Google speech service — and it never falls back to a cloud STT. After a few conversations each model row shows its measured speed on your phone, so you can compare.
+8. **On-device voice** (optional, needed on GrapheneOS) — under *On-device voice*, **Download** a voice (Kitten, Piper or Kokoro; ~27–320 MB), tap **Play sample** to hear and time it, pick one, and switch on **Use on-device voice**. Replies are then spoken by the phone itself, with no network and no system text-to-speech engine.
 
 Tap the 🎤 in the chat top bar (or use the assist gesture / wake word) to enter
 voice conversation.
 
 ## Build from source
 
-Requires JDK 17 and the Android SDK (platform 34, build-tools 34). Set
-`local.properties` with `sdk.dir=...`, then:
+### 1. Install JDK 17
+
+The project (AGP 8.2.2, Java 17 source/target) needs **JDK 17**. You don't
+install Gradle yourself — `./gradlew` downloads the right version on first run.
+
+```bash
+# Ubuntu / Debian
+sudo apt install openjdk-17-jdk
+java -version   # should report 17.x
+```
+
+If several JDKs are installed, point Gradle at 17:
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+```
+
+### 2. Install the Android SDK
+
+Without an SDK the build stops with `SDK location not found`. You need
+**platform 34** and **build-tools 34** (plus `platform-tools` for `adb`). Pick
+one:
+
+**Option A — Android Studio (easiest).** Install it and let the setup wizard
+download the SDK (default location `~/Android/Sdk`). In *SDK Manager*, add
+**Android 14 (API 34)**. Gradle fetches build-tools 34.0.0 on its own on the
+first build once the licenses are accepted.
+
+**Option B — command-line tools only.**
+
+1. Download "Command line tools only" for Linux from
+   <https://developer.android.com/studio#command-tools> (the filename's version
+   number changes, so copy the link from that page).
+2. Unpack it so `sdkmanager` ends up at
+   `~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager`:
+
+   ```bash
+   mkdir -p ~/Android/Sdk/cmdline-tools
+   unzip commandlinetools-linux-*_latest.zip -d ~/Android/Sdk/cmdline-tools
+   mv ~/Android/Sdk/cmdline-tools/cmdline-tools ~/Android/Sdk/cmdline-tools/latest
+   ```
+
+3. Install the required packages and accept the licenses:
+
+   ```bash
+   ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+   ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager --licenses
+   ```
+
+### 3. Point the project at the SDK
+
+Create `local.properties` in the repo root (it's gitignored). The path must be
+absolute — `~` is not expanded:
+
+```bash
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+```
+
+Alternatively, set the `ANDROID_HOME` environment variable instead.
+
+### 4. Build
 
 ```bash
 ./gradlew :app:assembleDebug
-# output: app/build/outputs/apk/debug/app-debug.apk
+# output: app/build/outputs/apk/debug/app-debug.apk (~98 MB)
 ```
+
+The first build downloads Gradle and all dependencies and takes a few minutes.
+Confirm it printed `BUILD SUCCESSFUL` before installing.
+
+### 5. Install on the phone
+
+Enable USB debugging, connect the phone, then:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+`adb` lives in `~/Android/Sdk/platform-tools`. To use it as plain `adb`, add
+this to `~/.bashrc`:
+
+```bash
+export PATH=$PATH:$HOME/Android/Sdk/platform-tools
+```
+
+Notes:
+
+- Debug builds install as `dk.foss.jarvis.debug`, so they sit side-by-side with a
+  release install (`dk.foss.jarvis`).
+- If the build **failed**, `adb install -r` will happily re-install the previous
+  APK and report "Success". Check `ls -la app/build/outputs/apk/debug/app-debug.apk`
+  to make sure the timestamp is fresh.
+- A default Hermes connection can be baked in at build time with an optional,
+  gitignored `keys.properties` (`JARVIS_BASE_URL`, `JARVIS_API_KEY`,
+  `JARVIS_ELEVEN_KEY`, `JARVIS_ELEVEN_VOICE`). Without it you enter these in
+  Settings (see [First-run setup](#first-run-setup)).
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `SDK location not found` | Create `local.properties` with `sdk.dir=...` (step 3) or set `ANDROID_HOME`. |
+| Wrong Java version errors | Install JDK 17 and set `JAVA_HOME` (step 1). |
+| Licenses / missing build-tools | Run `sdkmanager --licenses` and install `build-tools;34.0.0` (step 2). |
+| Wake word doesn't work on an emulator | The native libs are ARM-only (`arm64-v8a`, `armeabi-v7a`); use a real phone. |
 
 The openWakeWord model files (`melspectrogram.onnx`, `embedding_model.onnx`,
 `hey_jarvis_v0.1.onnx`) live in `app/src/main/assets/` and are included.
@@ -81,7 +182,9 @@ Stack: Kotlin + Jetpack Compose, minSdk 29 / target 34. Design notes in
 
 - **Wake word costs battery** and requires an always-on mic foreground service (Android restricts the privileged hotword API to preinstalled apps, so this is the only option for third-party apps).
 - **Background launch on wake** uses a full-screen-intent notification; reliability varies by OEM/Android version (Android 14 restricts full-screen intents). The assist gesture is the most reliable trigger.
-- **On-device STT** quality/language support depends on the phone (Danish needs the language pack installed).
+- **Android's built-in STT** quality/language support depends on the phone (Danish needs the language pack installed), and it needs a speech service that GrapheneOS doesn't ship — use the on-device Parakeet option there.
+- **On-device speech models** are English (except Parakeet v3), can be large, and hold memory while loaded (freed after 5 idle minutes). Each model has its own licence — e.g. NVIDIA Parakeet is CC-BY-4.0 — so check the model card before redistributing. Runtime: [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0).
+- **Licensing of the on-device voices:** sherpa-onnx's native library statically includes **espeak-ng (GPL-3.0)**, which the Piper/Kokoro/Kitten voices need. Building and running the app yourself is fine, but distributing a built APK carries GPL obligations; check this before publishing one.
 - **ElevenLabs** is per-user (your key, your usage cost).
 
 ## Credits & license
