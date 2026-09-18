@@ -50,6 +50,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val speakingIndex = mutableStateOf(-1)
     val pendingText = mutableStateOf("")
     private var spokenCount = 0
+    // Index of this turn's reply in the shared conversation, or -1 before its first word. The reply is
+    // written there as it streams (not when the stream ends), so a turn cut short by a tap, the screen
+    // locking or leaving the screen still keeps whatever was said.
+    private var assistantIndex = -1
 
     private var settings: JarvisSettings? = null
     private var tts: TtsEngine? = null
@@ -140,8 +144,17 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Close out the current reply (finished or cut off) and save the conversation. */
+    private fun endReply() {
+        if (assistantIndex >= 0) {
+            assistantIndex = -1
+            repo.persistAsync()
+        }
+    }
+
     /** Start a fresh turn: invalidate in-flight callbacks and clear pipeline state. */
     private fun beginTurn() {
+        endReply() // a reply still streaming from the previous turn is kept, not dropped
         turn++
         main.removeCallbacks(idleFlush)
         main.removeCallbacks(stallIndicator)
@@ -173,6 +186,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
      * across screen visits while the shared conversation may have been replaced).
      */
     fun resetView() {
+        endReply()
         turn++ // invalidate any in-flight callbacks from a prior screen visit
         main.removeCallbacks(rearmWake)
         emptyWakeTurns = 0
@@ -234,7 +248,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         state.value = ConvState.Thinking
         working.value = true
         main.postDelayed(stallIndicator, STALL_MS)
+        assistantIndex = -1
         repo.addMessage("user", userText)
+        repo.persistAsync() // the utterance is saved now, not when the reply finishes
         val requestHistory = repo.historyForRequest()
 
         val s = settings ?: return
@@ -263,8 +279,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 sentenceBuffer.setLength(0)
                 if (rest.isNotEmpty()) enqueueSpeech(rest)
                 pendingText.value = ""
-                if (reply.value.isNotBlank()) repo.addMessage("assistant", reply.value)
-                viewModelScope.launch { repo.persist() }
+                // The reply is already in the conversation (see onTextDelta); just close it out and save.
+                assistantIndex = -1
+                repo.persistAsync()
                 streamDone = true
                 pump()
             }
@@ -275,6 +292,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 working.value = false
                 stalled.value = false
                 error.value = message
+                endReply() // keep any partial reply that arrived before the failure
                 goIdle()
             }
         }, systemPrompt = s.voiceInstructions)
@@ -283,6 +301,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     /** A token arrived: show it, and speak as soon as a full sentence is available. */
     private fun onTextDelta(delta: String) {
         reply.value += delta
+        if (assistantIndex < 0) assistantIndex = repo.addMessage("assistant", delta)
+        else repo.appendToMessage(assistantIndex, delta)
         sentenceBuffer.append(delta)
         extractSentences()
         pendingText.value = sentenceBuffer.toString().trim()
@@ -407,6 +427,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopAll() {
         continuous = false
+        assistantIndex = -1 // the persistAsync() below saves the partial reply already in the conversation
         turn++
         emptyWakeTurns = 0
         main.removeCallbacks(idleFlush)
@@ -436,6 +457,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        assistantIndex = -1
         main.removeCallbacks(idleFlush)
         main.removeCallbacks(stallIndicator)
         main.removeCallbacks(rearmWake)

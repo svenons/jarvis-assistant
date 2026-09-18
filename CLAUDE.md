@@ -153,10 +153,19 @@ screens add `BackHandler { screen = Chat }`.
 - **Strip `isError` messages** before building a Hermes request
   (`historyForRequest`) and before saving (`persist`) — errors are UI-only.
 - **`ConversationRepository` is the single mutation point** for the active
-  conversation; its `messages` is a `SnapshotStateList` and `sessionId`/dirty are
-  `@Volatile` (written from the SSE callback thread). It uses an app-lifetime
-  `ioScope` (not `viewModelScope`, which is cancelled before `onCleared` and
-  would drop the final save). ViewModels call `persistAsync()` in `onCleared`.
+  conversation; its `messages` is a `SnapshotStateList` and `sessionId` is
+  `@Volatile` (written from the SSE callback thread). Unsaved changes are tracked with a version
+  counter (not a dirty flag, which a concurrent edit could clear), saves are serialized by a mutex, and
+  `ConversationStore.save` returns false and logs on failure so the change stays pending. It uses an
+  app-lifetime `ioScope` (not `viewModelScope`, which is cancelled before `onCleared` and would drop
+  the final save). ViewModels call `persistAsync()` in `onCleared`.
+- **Voice turns are saved as they happen, not when they finish.** `ConversationViewModel.think` saves the
+  user's utterance immediately, and `onTextDelta` streams the reply into the repository as it arrives
+  (`assistantIndex`), so a turn cut short by a mic tap, the screen locking or leaving the screen keeps what
+  was said. `endReply()` closes the reply and saves at every turn boundary (`beginTurn`, `resetView`,
+  `onError`, `onComplete`). Don't move the reply back to a single `addMessage` in `onComplete`: any
+  `turn` change before the stream ends would then silently drop it. History shows one row per conversation
+  (the whole voice session, until "New conversation"), titled by its first message, with the message count.
 - **Edge-to-edge:** `WindowCompat.setDecorFitsSystemWindows(window, false)` +
   transparent bars in `MainActivity`. Each screen then applies its own insets:
   `statusBarsPadding()` (ConversationScreen), `imePadding()` (ChatScreen +

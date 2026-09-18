@@ -1,6 +1,7 @@
 package dk.foss.jarvis.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -12,7 +13,8 @@ class ConversationStore(context: Context) {
     private val dir = File(context.applicationContext.filesDir, "conversations").apply { mkdirs() }
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    suspend fun save(conversation: Conversation) = withContext(Dispatchers.IO) {
+    /** Returns false (and logs why) if the conversation couldn't be written, so the caller can retry. */
+    suspend fun save(conversation: Conversation): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             // Write to a temp file then atomically rename, so concurrent/torn writes
             // can't corrupt the JSON.
@@ -22,8 +24,7 @@ class ConversationStore(context: Context) {
             if (!tmp.renameTo(target)) {
                 target.writeText(tmp.readText()); tmp.delete()
             }
-        }
-        Unit
+        }.onFailure { Log.e("ConversationStore", "saving ${conversation.id} failed", it) }.isSuccess
     }
 
     suspend fun load(id: String): Conversation? = withContext(Dispatchers.IO) {
