@@ -61,14 +61,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             replyIndex = -1
             repo.addMessage("user", text)
             repo.persistAsync() // saved now, not when the reply finishes
+            val turnStart = repo.messages.size // the turn's entries start right after your message
             val history = repo.historyForRequest()
             isStreaming.value = true
 
             val client = HermesClient(s.baseUrl, s.apiKey)
             currentSource = client.streamChat(history, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
                 override fun onDelta(textDelta: String) = onMain {
-                    if (replyIndex < 0) replyIndex = repo.addMessage("assistant", textDelta)
-                    else repo.appendToMessage(replyIndex, textDelta)
+                    replyIndex = repo.streamReply(replyIndex, textDelta)
                 }
 
                 override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
@@ -85,6 +85,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     isStreaming.value = false
                     currentSource = null
                     repo.persistAsync()
+                    if (s.showReasoning) {
+                        val turnEnd = repo.messages.size
+                        viewModelScope.launch { TurnEnricher.addDetails(client, repo, turnStart, turnEnd) }
+                    }
                 }
 
                 override fun onError(message: String) = onMain {

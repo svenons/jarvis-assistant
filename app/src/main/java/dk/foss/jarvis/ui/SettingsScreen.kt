@@ -78,6 +78,11 @@ import dk.foss.jarvis.wake.WakeModels
 import androidx.core.content.ContextCompat
 import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
+import dk.foss.jarvis.hermes.ModelEntry
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonElement
+import dk.foss.jarvis.hermes.ModelOptionsResponse
 import dk.foss.jarvis.voice.ElevenLabsVoices
 import dk.foss.jarvis.voice.ElevenVoice
 import dk.foss.jarvis.voice.LocalSttEngine
@@ -116,10 +121,16 @@ fun SettingsScreen(onBack: () -> Unit) {
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf(SettingsStore.DEFAULT_MODEL) }
+    // The model names Hermes itself offers (GET /v1/models), for the picker under Model.
+    var hermesModels by remember { mutableStateOf<List<ModelEntry>>(emptyList()) }
+    // The real provider catalog (GET /api/model/options); null when this Hermes doesn't offer it.
+    var modelOptions by remember { mutableStateOf<ModelOptionsResponse?>(null) }
+    var modelMenu by remember { mutableStateOf(false) }
     var provider by remember { mutableStateOf("") }
     var assistantName by remember { mutableStateOf("") }
     var savedName by remember { mutableStateOf("") } // last name the wake service was told about
     var voiceBrief by remember { mutableStateOf(true) }
+    var showReasoning by remember { mutableStateOf(true) }
     var voicePrompt by remember { mutableStateOf("") }
     var elevenKey by remember { mutableStateOf("") }
     var elevenVoice by remember { mutableStateOf(SettingsStore.DEFAULT_ELEVEN_VOICE) }
@@ -269,6 +280,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         assistantName = s.assistantName
         savedName = s.assistantName
         voiceBrief = s.voiceBrief
+        showReasoning = s.showReasoning
         voicePrompt = s.voicePrompt
         elevenKey = s.elevenKey
         elevenVoice = s.elevenVoiceId
@@ -279,6 +291,12 @@ fun SettingsScreen(onBack: () -> Unit) {
         ttsModelId = s.localTtsModel
         wakeModelId = s.wakeModel
         wakeCustomName = s.wakeCustomName
+        // With a connection already saved, offer Hermes's model names without waiting for "Save & test".
+        if (s.isConfigured) {
+            val hermes = HermesClient(s.baseUrl, s.apiKey)
+            hermesModels = hermes.fetchModels().getOrDefault(emptyList())
+            modelOptions = hermes.fetchModelOptions().getOrNull()
+        }
         wakeSensitivity = s.wakeSensitivity
         loaded = true
     }
@@ -426,14 +444,47 @@ fun SettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     colors = textFieldColors,
                 )
-                OutlinedTextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = { Text("Model") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = textFieldColors,
-                )
+                val pickerRows = pickerRows(modelOptions, hermesModels)
+                ExposedDropdownMenuBox(
+                    expanded = modelMenu && pickerRows.isNotEmpty(),
+                    onExpandedChange = { modelMenu = it },
+                ) {
+                    OutlinedTextField(
+                        value = model,
+                        onValueChange = { model = it },
+                        label = { Text("Model") },
+                        singleLine = true,
+                        trailingIcon = {
+                            if (pickerRows.isNotEmpty()) ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelMenu)
+                        },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        colors = textFieldColors,
+                    )
+                    ExposedDropdownMenu(
+                        expanded = modelMenu && pickerRows.isNotEmpty(),
+                        onDismissRequest = { modelMenu = false },
+                    ) {
+                        pickerRows.forEach { row ->
+                            when (row) {
+                                is PickerRow.Header -> Text(
+                                    row.text,
+                                    fontFamily = DmSans,
+                                    fontSize = 12.sp,
+                                    color = JarvisColors.Muted,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                )
+                                is PickerRow.Choice -> DropdownMenuItem(
+                                    text = { Text(row.label) },
+                                    onClick = {
+                                        model = row.model
+                                        provider = row.provider // sending the provider is what makes Hermes honour the model
+                                        modelMenu = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = provider,
                     onValueChange = { provider = it },
@@ -443,13 +494,43 @@ fun SettingsScreen(onBack: () -> Unit) {
                     colors = textFieldColors,
                 )
                 Text(
-                    "Hermes ignores the model above unless a provider is sent with it (e.g. minimax) " +
-                        "or the server sets gateway.platforms.api_server.direct_model_requests: true. " +
-                        "Leave blank to use the model your Hermes is configured with.",
+                    modelHelp(model.trim(), provider.trim(), hermesModels, modelOptions),
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
                 )
+
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Reasoning and tool calls in history",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "After each reply, read what Hermes stored for the turn and add the model's reasoning " +
+                                "(when it gives one) to the top of the turn. It appears once the reply is done, not live.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = showReasoning,
+                        onCheckedChange = {
+                            showReasoning = it
+                            scope.launch { store.updateShowReasoning(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
 
                 PillButton(
                     text = "Save & test connection",
@@ -459,12 +540,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                             testing = true
                             status = "Testing\u2026"
                             val s = store.settings.first()
-                            val result = HermesClient(s.baseUrl, s.apiKey).testConnection()
+                            val result = HermesClient(s.baseUrl, s.apiKey).fetchModels()
                             testing = false
+                            result.onSuccess { hermesModels = it }
+                            modelOptions = HermesClient(s.baseUrl, s.apiKey).fetchModelOptions().getOrNull()
                             status = result.fold(
-                                onSuccess = { ids ->
-                                    "\u2713 Connected. ${ids.size} model(s)" +
-                                        if (ids.isNotEmpty()) ": ${ids.take(5).joinToString()}" else ""
+                                onSuccess = { models ->
+                                    "\u2713 Connected. ${models.size} model(s)" +
+                                        if (models.isNotEmpty()) ": ${models.take(5).joinToString { it.id }}" else ""
                                 },
                                 onFailure = { "\u2717 ${it.message}" },
                             )
@@ -1263,4 +1346,58 @@ private fun openAssistantSettings(context: Context) {
 private fun voiceLabel(voiceId: String, voices: List<ElevenVoice>): String {
     if (voiceId.isBlank()) return ""
     return voices.firstOrNull { it.voice_id == voiceId }?.name ?: voiceId
+}
+
+private sealed interface PickerRow {
+    data class Header(val text: String) : PickerRow
+    data class Choice(val label: String, val model: String, val provider: String) : PickerRow
+}
+
+private fun JsonElement.asModelId(): String? = (this as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+/**
+ * What the Model menu offers: Hermes's own default, its model routes, then real models grouped by provider
+ * (the provider's featured ones, or its first few). Choosing a provider model also sets the Provider field.
+ */
+private fun pickerRows(options: ModelOptionsResponse?, routes: List<ModelEntry>): List<PickerRow> {
+    val rows = ArrayList<PickerRow>()
+    if (options != null || routes.isNotEmpty()) {
+        rows += PickerRow.Choice("${SettingsStore.DEFAULT_MODEL} (Hermes's own default)", SettingsStore.DEFAULT_MODEL, "")
+    }
+    val aliases = routes.filter { it.id != SettingsStore.DEFAULT_MODEL }
+    if (aliases.isNotEmpty()) {
+        rows += PickerRow.Header("Your Hermes's model routes")
+        aliases.forEach { rows += PickerRow.Choice(if (it.root != null && it.root != it.id) "${it.id} (${it.root})" else it.id, it.id, "") }
+    }
+    options?.providers?.filter { it.authenticated }?.forEach { p ->
+        val featured = p.featured_models.mapNotNull { it.asModelId() }
+        val models = featured.ifEmpty { p.models.mapNotNull { it.asModelId() }.take(MODELS_PER_PROVIDER) }
+        if (models.isEmpty()) return@forEach
+        val more = (p.total_models ?: p.models.size) - models.size
+        rows += PickerRow.Header((p.name ?: p.slug) + if (more > 0) " ($more more: type the name)" else "")
+        models.forEach { rows += PickerRow.Choice(it, it, p.slug) }
+    }
+    return rows
+}
+
+private const val MODELS_PER_PROVIDER = 12
+
+/** What the chosen model will actually do, given what Hermes offers. */
+private fun modelHelp(model: String, provider: String, routes: List<ModelEntry>, options: ModelOptionsResponse?): String {
+    val current = options?.model?.takeIf { it.isNotBlank() }?.let { m ->
+        " (currently $m" + (options.provider?.takeIf { it.isNotBlank() }?.let { " via $it" } ?: "") + ")"
+    } ?: ""
+    val pinned = " A model already set on a conversation inside Hermes (a /model command) wins until you start a new one."
+    val direct = "Otherwise it is ignored unless a Provider is set with it (for example minimax) or the server sets " +
+        "gateway.platforms.api_server.direct_model_requests: true."
+    return when {
+        model.isEmpty() || model == SettingsStore.DEFAULT_MODEL -> "Hermes uses the model it is configured with$current."
+        routes.any { it.id == model } -> {
+            val target = routes.first { it.id == model }.root?.takeIf { it != model }
+            "A model route on your Hermes" + (target?.let { ", using $it" } ?: "") + "." + pinned
+        }
+        provider.isNotEmpty() -> "Sent with provider \"$provider\", so Hermes uses this model for your messages.$pinned"
+        routes.isEmpty() -> "Hermes only honours this name if it is one of its model routes. $direct"
+        else -> "Not one of your Hermes's model routes. $direct"
+    }
 }

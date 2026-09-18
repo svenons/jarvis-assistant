@@ -1,8 +1,11 @@
 package dk.foss.jarvis.ui
 
 import android.app.Application
+import android.app.KeyguardManager
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +17,7 @@ import dk.foss.jarvis.voice.AndroidTts
 import dk.foss.jarvis.voice.ElevenLabsTts
 import dk.foss.jarvis.voice.LocalRecognizer
 import dk.foss.jarvis.voice.LocalTts
+import dk.foss.jarvis.voice.QueuedTts
 import dk.foss.jarvis.voice.ScribeRecognizer
 import dk.foss.jarvis.voice.SpeechInput
 import dk.foss.jarvis.voice.TtsEngine
@@ -40,6 +44,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val reply = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
     val hint = mutableStateOf<String?>(null)
+    /** Set when the voice couldn't speak a sentence, so it is never skipped silently. Cleared each turn. */
+    val ttsNotice = mutableStateOf<String?>(null)
+    /** The lock screen is up, so anything that changes something needs the phone unlocked first. */
+    val locked = mutableStateOf(false)
+    // Opened over the lock screen: the first turn starts a fresh conversation, so nothing from earlier chats is sent.
+    private var freshConversation = false
     val working = mutableStateOf(false) // Hermes stream still open (response not complete)
     val stalled = mutableStateOf(false) // content paused mid-stream — likely running a tool
     /** Tools the agent ran this turn (from `hermes.tool.progress`) — display only, never spoken. */
@@ -66,6 +76,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val sentenceBuffer = StringBuilder()
     private val ttsQueue = ArrayDeque<String>()
     private var speaking = false
+    private var pendingSpeech = 0 // sentences handed to a queueing voice that haven't finished playing
+    private var ttsFailures = 0
     private var streamDone = false
     private var turn = 0 // bumped each turn; stale async callbacks check this and bail
     private var retriedThisTurn = false
@@ -138,6 +150,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 state.value = ConvState.Idle
                 return@launch
             }
+            if (freshConversation) {
+                freshConversation = false
+                repo.persist() // keep the earlier conversation in History, then start clean
+                repo.startNew()
+            }
             beginTurn()
             state.value = ConvState.Listening
             startRecognition()
@@ -167,6 +184,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
         speaking = false
+        pendingSpeech = 0
+        ttsFailures = 0
+        ttsNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -203,6 +223,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         pendingText.value = ""
         spokenCount = 0
         state.value = ConvState.Idle
+        locked.value = isPhoneLocked()
+        freshConversation = locked.value
     }
 
     private fun startRecognition() {
@@ -249,6 +271,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         assistantIndex = -1
         repo.addMessage("user", userText)
         repo.persistAsync() // the utterance is saved now, not when the reply finishes
+        val turnStart = repo.messages.size // the turn's entries start right after the utterance
         val requestHistory = repo.historyForRequest()
 
         val s = settings ?: return
@@ -287,8 +310,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 // The reply is already in the conversation (see onTextDelta); just close it out and save.
                 assistantIndex = -1
                 repo.persistAsync()
+                if (s.showReasoning) {
+                    val turnEnd = repo.messages.size
+                    viewModelScope.launch { TurnEnricher.addDetails(client, repo, turnStart, turnEnd) }
+                }
                 streamDone = true
-                pump()
+                if (tts is QueuedTts) finishIfSpoken() else pump()
             }
 
             override fun onError(message: String) = onMain {
@@ -300,14 +327,25 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 endReply() // keep any partial reply that arrived before the failure
                 goIdle()
             }
-        }, systemPrompt = s.voiceInstructions)
+        }, systemPrompt = systemPromptFor(s))
+    }
+
+    private fun isPhoneLocked(): Boolean =
+        (getApplication<Application>().getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
+
+    /** The voice-style instruction, plus (when the lock screen is up) the locked-phone instruction. Re-sent every turn. */
+    private fun systemPromptFor(s: JarvisSettings): String? {
+        val lockedNow = isPhoneLocked()
+        locked.value = lockedNow
+        return listOfNotNull(s.voiceInstructions, LOCKED_PROMPT.takeIf { lockedNow })
+            .joinToString("\n\n")
+            .ifBlank { null }
     }
 
     /** A token arrived: show it, and speak as soon as a full sentence is available. */
     private fun onTextDelta(delta: String) {
         reply.value += delta
-        if (assistantIndex < 0) assistantIndex = repo.addMessage("assistant", delta)
-        else repo.appendToMessage(assistantIndex, delta)
+        assistantIndex = repo.streamReply(assistantIndex, delta)
         sentenceBuffer.append(delta)
         extractSentences()
         pendingText.value = sentenceBuffer.toString().trim()
@@ -353,9 +391,55 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun enqueueSpeech(text: String) {
-        ttsQueue.addLast(text)
         segments.add(text)
+        val engine = tts
+        if (engine is QueuedTts) {
+            speakQueued(engine, text, segments.lastIndex)
+            return
+        }
+        ttsQueue.addLast(text)
         pump()
+    }
+
+    /**
+     * A voice that queues (the on-device ones) gets every sentence as soon as it exists, so it synthesizes the next
+     * while the current one plays. The one-at-a-time [pump] below is for voices that can't.
+     */
+    private fun speakQueued(engine: QueuedTts, text: String, index: Int) {
+        val myTurn = turn
+        pendingSpeech++
+        engine.enqueue(
+            text,
+            onStart = {
+                if (turn == myTurn) {
+                    speakingIndex.value = index
+                    if (state.value != ConvState.Speaking) state.value = ConvState.Speaking
+                }
+            },
+            onDone = { if (turn == myTurn) { pendingSpeech--; finishIfSpoken() } },
+            onError = { message ->
+                if (turn == myTurn) {
+                    pendingSpeech--
+                    reportSpeechFailure(text, message)
+                    finishIfSpoken()
+                }
+            },
+        )
+    }
+
+    /** The reply has streamed in and every queued sentence has played (or failed): the turn is over. */
+    private fun finishIfSpoken() {
+        if (streamDone && pendingSpeech <= 0 && ttsQueue.isEmpty()) finishTurn()
+    }
+
+    private fun reportSpeechFailure(text: String, message: String) {
+        Log.w("ConversationVM", "voice failed on \"${text.take(40)}\": $message")
+        ttsFailures++
+        ttsNotice.value = if (ttsFailures >= 2) {
+            "The voice keeps failing ($message). Try another one in Settings."
+        } else {
+            "Couldn\u2019t speak one sentence: $message"
+        }
     }
 
     /** Speak queued sentences one after another (the next synthesizes after the prior plays). */
@@ -448,6 +532,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
         speaking = false
+        pendingSpeech = 0
+        ttsNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -476,6 +562,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        /**
+         * Sent with every turn spoken over the lock screen. It is an instruction to the model, not a lock: Hermes
+         * runs its tools on the server, so nothing in this app can stop an action it decides to take.
+         */
+        const val LOCKED_PROMPT =
+            "The phone is locked. Whoever is speaking has not unlocked it, so you can't be sure they are its owner. " +
+                "Answer questions and do read-only things as usual. Before anything that changes something, sends or " +
+                "deletes something, spends money or controls a device (for example sending an email, writing or " +
+                "deleting a file, or changing a setting), do not do it yet: say briefly that it needs the phone " +
+                "unlocked, and ask them to unlock it and ask again."
         const val IDLE_FLUSH_MS = 350L
         const val STALL_MS = 800L
         const val WAKE_REARM_DELAY_MS = 1200L

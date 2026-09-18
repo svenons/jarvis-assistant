@@ -70,6 +70,8 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val working by vm.working
     val stalled by vm.stalled
     val tools = vm.tools
+    val ttsNotice by vm.ttsNotice
+    val locked by vm.locked
 
     val segments = vm.segments
     val speakingIndex by vm.speakingIndex
@@ -127,6 +129,12 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
 
     DeepSpaceBackground(active = isActive) {
         Box(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
+            if (locked) {
+                Box(Modifier.align(Alignment.TopStart).padding(top = 12.dp)) {
+                    StatusTag("LOCKED", JarvisColors.ErrorOrange)
+                }
+            }
+
             // Top-right close button
             IconButton(
                 onClick = onExit,
@@ -181,6 +189,7 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
                         pendingText = pendingText,
                         listState = listState,
                         tools = tools,
+                        notice = ttsNotice,
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -470,6 +479,7 @@ private fun SpeakingContent(
     pendingText: String,
     listState: androidx.compose.foundation.lazy.LazyListState,
     tools: List<ToolStep>,
+    notice: String?,
     onMicTap: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
@@ -489,6 +499,18 @@ private fun SpeakingContent(
             Spacer(Modifier.height(8.dp))
 
             StatusTag("SPEAKING", JarvisColors.Cyan)
+
+            notice?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = it,
+                    fontFamily = DmSans,
+                    fontSize = 13.sp,
+                    color = JarvisColors.ErrorOrange,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                )
+            }
 
             if (tools.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))

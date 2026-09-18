@@ -11,6 +11,7 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.net.URLEncoder
 
 /**
  * Talks to a Hermes `api_server`. This is the ONLY coupling to Hermes:
@@ -107,8 +108,55 @@ class HermesClient(
         return EventSources.createFactory(Http.streaming).newEventSource(builder.build(), listener)
     }
 
+    /**
+     * GET /api/sessions/{id}/messages: what Hermes stored for the session (newest page). Read after a turn to
+     * pick up that turn's reasoning and tool calls, which the chat stream doesn't carry. Any failure (older
+     * Hermes without this route, a session it doesn't know) is a failed Result the caller just ignores.
+     */
+    suspend fun fetchSessionMessages(sessionId: String, limit: Int = 80): Result<List<SessionMessage>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val id = URLEncoder.encode(sessionId, "UTF-8")
+                val req = Request.Builder()
+                    .url("$baseUrl/api/sessions/$id/messages?limit=$limit&order=latest")
+                    .addHeader("Authorization", "Bearer $apiKey")
+                    .get()
+                    .build()
+                Http.base.newCall(req).execute().use { resp ->
+                    val text = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+                    json.decodeFromString(SessionMessagesResponse.serializer(), text).data
+                }
+            }
+        }
+
+    /**
+     * GET /api/model/options: the models Hermes could run, by provider (the catalog its own model picker uses).
+     * Picking one of these and sending its provider with the model is what makes Hermes honour the choice.
+     */
+    suspend fun fetchModelOptions(): Result<ModelOptionsResponse> = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$baseUrl/api/model/options")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .get()
+                .build()
+            Http.base.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+                json.decodeFromString(ModelOptionsResponse.serializer(), text)
+            }
+        }
+    }
+
     /** GET /v1/models — returns model ids on success, or a failure with the reason. */
-    suspend fun testConnection(): Result<List<String>> = withContext(Dispatchers.IO) {
+    suspend fun testConnection(): Result<List<String>> = fetchModels().map { models -> models.map { it.id } }
+
+    /**
+     * GET /v1/models: `hermes-agent` (meaning "Hermes's own default model") plus any model routes the server's
+     * admin configured. These are the only names a request can pick without also naming a provider.
+     */
+    suspend fun fetchModels(): Result<List<ModelEntry>> = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
                 .url("$baseUrl/v1/models")
@@ -120,7 +168,7 @@ class HermesClient(
                 if (!resp.isSuccessful) {
                     throw RuntimeException("HTTP ${resp.code}: ${text.take(200).ifBlank { resp.message }}")
                 }
-                json.decodeFromString(ModelsResponse.serializer(), text).data.map { it.id }
+                json.decodeFromString(ModelsResponse.serializer(), text).data
             }
         }
     }

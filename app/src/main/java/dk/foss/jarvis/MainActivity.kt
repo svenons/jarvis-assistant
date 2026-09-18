@@ -2,7 +2,10 @@ package dk.foss.jarvis
 
 import android.Manifest
 import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Bundle
@@ -44,6 +47,19 @@ class MainActivity : ComponentActivity() {
     // jump into conversation mode (works for both cold start and onNewIntent).
     private var assistEpoch by mutableStateOf(0)
 
+    // True while the lock screen is up. Opened over it (wake word / assist gesture), the app shows only the voice
+    // screen: no chat history, no conversation list, no Settings (which holds the API key), and closing it leaves
+    // the app instead of dropping into the chat. Unlocking lifts all of that.
+    private var locked by mutableStateOf(false)
+
+    private fun refreshLocked() {
+        locked = (getSystemService(KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
+    }
+
+    private val lockStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = refreshLocked()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Keep the screen awake while the assistant is in the foreground.
@@ -60,6 +76,12 @@ class MainActivity : ComponentActivity() {
             showOverLockScreen()
         }
         rearmWakeWord()
+        refreshLocked()
+        ContextCompat.registerReceiver(
+            this, lockStateReceiver,
+            IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_OFF) },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
 
         setContent {
             // The assistant's name and wake phrase, shown across the screens; follows Settings live.
@@ -78,7 +100,8 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(assistEpoch) {
                     if (assistEpoch > 0) screen = Screen.Conversation
                 }
-                when (screen) {
+                // Locked: only the voice screen, whatever `screen` says.
+                when (if (locked) Screen.Conversation else screen) {
                     Screen.Chat -> {
                         val vm: ChatViewModel = viewModel()
                         ChatScreen(
@@ -93,12 +116,13 @@ class MainActivity : ComponentActivity() {
                         SettingsScreen(onBack = { screen = Screen.Chat })
                     }
                     Screen.Conversation -> {
-                        BackHandler { screen = Screen.Chat }
+                        val leave = { if (locked) finish() else screen = Screen.Chat }
+                        BackHandler { leave() }
                         val cvm: ConversationViewModel = viewModel()
                         ConversationScreen(
                             vm = cvm,
                             assistTrigger = assistEpoch,
-                            onExit = { screen = Screen.Chat },
+                            onExit = { leave() },
                         )
                     }
                     Screen.History -> {
@@ -116,8 +140,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshLocked()
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(lockStateReceiver) }
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        refreshLocked()
         setIntent(intent)
         if (isAssistIntent(intent)) {
             assistEpoch++
@@ -134,7 +169,7 @@ class MainActivity : ComponentActivity() {
         // Actually dismiss the keyguard so the user can interact immediately.
         val km = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
         km?.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
-            override fun onDismissSucceeded() {}
+            override fun onDismissSucceeded() = refreshLocked()
             override fun onDismissCancelled() {}
             override fun onDismissError() {}
         })

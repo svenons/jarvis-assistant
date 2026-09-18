@@ -14,9 +14,14 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.Request
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
@@ -153,6 +158,54 @@ abstract class ModelStore<M : Any> {
         }
         if (!tmp.renameTo(dest)) throw IOException("Could not save ${dest.name}")
         onBytes(bytes)
+    }
+
+    /**
+     * Unpack a `.tar.bz2` into [dest], dropping the archive's single top-level folder. bzip2 is
+     * decoded in pure Java and is CPU-bound (~5 s per 67 MB on a fast desktop, several times that on
+     * a phone), so [onProgress] reports how much of the archive has been consumed.
+     */
+    protected suspend fun unpack(archive: File, dest: File, onProgress: (Long) -> Unit) {
+        dest.mkdirs()
+        val base = dest.canonicalPath + File.separator
+        val source = BufferedInputStream(CountingInput(archive.inputStream(), onProgress))
+        TarArchiveInputStream(BZip2CompressorInputStream(source)).use { tar ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val entry = tar.nextEntry ?: break
+                currentCoroutineContext().ensureActive()
+                val rel = entry.name.substringAfter('/', "")
+                if (rel.isEmpty()) continue
+                val out = File(dest, rel).canonicalFile
+                if (!out.path.startsWith(base)) throw IOException("Unsafe path in archive: ${entry.name}")
+                if (entry.isDirectory) { out.mkdirs(); continue }
+                if (!entry.isFile) continue // no symlinks or devices
+                out.parentFile?.mkdirs()
+                FileOutputStream(out).use { o ->
+                    while (true) {
+                        val n = tar.read(buf)
+                        if (n < 0) break
+                        o.write(buf, 0, n)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Counts bytes read from the archive file, reporting every ~512 KB. */
+    private class CountingInput(input: InputStream, private val onBytes: (Long) -> Unit) : FilterInputStream(input) {
+        private var count = 0L
+        private var lastReport = 0L
+
+        override fun read(): Int = super.read().also { if (it >= 0) add(1) }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int =
+            super.read(b, off, len).also { if (it > 0) add(it.toLong()) }
+
+        private fun add(n: Long) {
+            count += n
+            if (count - lastReport >= 512 * 1024) { lastReport = count; onBytes(count) }
+        }
     }
 
     private fun set(model: M, state: ModelState) = _states.update { it + (idOf(model) to state) }

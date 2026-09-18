@@ -23,6 +23,20 @@ interface TtsEngine {
     fun shutdown()
 }
 
+/**
+ * A voice that can take the next sentence while the previous one is still playing, so there is no gap between
+ * them. Everything else speaks one sentence at a time through [TtsEngine.speak].
+ */
+interface QueuedTts : TtsEngine {
+    /**
+     * Queue [text] behind whatever is already queued. Its audio is synthesized as soon as the voice is free and
+     * appended to the same output, so it is ready when the sentence before it ends. [onStart] fires when this
+     * sentence begins to play, [onDone] once it has played, and [onError] if it could not be spoken (it is then
+     * skipped and the queue carries on). All callbacks arrive on the main thread.
+     */
+    fun enqueue(text: String, onStart: () -> Unit, onDone: () -> Unit, onError: (String) -> Unit)
+}
+
 /** Android's built-in TextToSpeech. Free, offline, available everywhere. */
 class AndroidTts(context: Context, private val languageTag: String?) : TtsEngine {
 

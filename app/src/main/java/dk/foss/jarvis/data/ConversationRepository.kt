@@ -59,7 +59,8 @@ class ConversationRepository private constructor(private val store: Conversation
         createdAt = c.createdAt
         sessionId = c.sessionId
         messages.clear()
-        messages.addAll(c.messages.map { UiMessage(it.role, it.text) })
+        // Replies saved before streamReply existed start with a blank line: clean them as they load.
+        messages.addAll(c.messages.map { UiMessage(it.role, if (it.role == "assistant") it.text.trimStart() else it.text) })
         markClean()
     }
 
@@ -92,6 +93,17 @@ class ConversationRepository private constructor(private val store: Conversation
         if (i >= 0 && !messages[i].toolDone) messages[i] = messages[i].copy(toolDone = true)
     }
 
+    /**
+     * Stream a reply chunk into the conversation. The reply is created on its first visible text, with leading
+     * blank lines dropped (Hermes opens replies with newlines, which showed up as an empty line above every
+     * answer in history), then appended to. Returns the reply's index, or -1 while it is still only whitespace.
+     */
+    fun streamReply(index: Int, delta: String): Int {
+        if (index >= 0) { appendToMessage(index, delta); return index }
+        val text = delta.trimStart()
+        return if (text.isEmpty()) -1 else addMessage("assistant", text)
+    }
+
     fun appendToMessage(index: Int, delta: String) {
         if (index in messages.indices) {
             val cur = messages[index]
@@ -107,9 +119,16 @@ class ConversationRepository private constructor(private val store: Conversation
         }
     }
 
-    /** History as Hermes chat messages for building a request: no errors, and no tool steps (not chat turns). */
+    /** History as Hermes chat messages for building a request: no errors, and no tool steps or reasoning (not chat turns). */
     fun historyForRequest(): List<ChatMessage> =
-        messages.filter { !it.isError && it.role != UiMessage.ROLE_TOOL }.map { ChatMessage(it.role, it.text) }
+        messages.filter { !it.isError && !UiMessage.isAnnotation(it.role) }.map { ChatMessage(it.role, it.text) }
+
+    /** Insert annotation messages (reasoning, tool steps) at [index], e.g. at the start of a finished turn. */
+    fun insertMessages(index: Int, items: List<UiMessage>) {
+        if (items.isEmpty() || index !in 0..messages.size) return
+        messages.addAll(index, items)
+        markChanged()
+    }
 
     suspend fun persist() = saveLock.withLock {
         val v = version.get()

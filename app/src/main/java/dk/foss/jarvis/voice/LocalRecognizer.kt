@@ -145,17 +145,25 @@ internal object LocalSttEngine {
         return synchronized(lock) {
             val rec = load(store, model)
             val start = SystemClock.elapsedRealtime()
-            val stream = rec.createStream()
-            val text = try {
-                stream.acceptWaveform(samples, SAMPLE_RATE)
-                rec.decode(stream)
-                rec.getResult(stream).text.trim()
-            } finally {
-                stream.release()
-            }
+            // Some models break on long audio (and return nothing, silently): give them short pieces.
+            val text = SttAudio.split(samples, model.maxSegmentSeconds, SAMPLE_RATE)
+                .joinToString(" ") { decode(rec, it) }
+                .trim()
+                .let { if (model.uppercaseOutput) SttAudio.sentenceCase(it) else it }
             val decodeMs = SystemClock.elapsedRealtime() - start
             record(model.id) { it.copy(audioMs = samples.size * 1000L / SAMPLE_RATE, decodeMs = decodeMs) }
             text
+        }
+    }
+
+    private fun decode(rec: OfflineRecognizer, samples: FloatArray): String {
+        val stream = rec.createStream()
+        return try {
+            stream.acceptWaveform(samples, SAMPLE_RATE)
+            rec.decode(stream)
+            rec.getResult(stream).text.trim()
+        } finally {
+            stream.release()
         }
     }
 
@@ -210,6 +218,24 @@ internal object LocalSttEngine {
                 tokens = path(LocalSttModel.Role.Tokens),
                 numThreads = threads,
                 modelType = "whisper",
+            )
+            LocalSttModel.Family.Transducer -> OfflineModelConfig(
+                transducer = OfflineTransducerModelConfig(
+                    encoder = path(LocalSttModel.Role.Encoder),
+                    decoder = path(LocalSttModel.Role.Decoder),
+                    joiner = path(LocalSttModel.Role.Joiner),
+                ),
+                tokens = path(LocalSttModel.Role.Tokens),
+                numThreads = threads,
+                modelType = "transducer",
+            )
+            LocalSttModel.Family.MoonshineV2 -> OfflineModelConfig(
+                moonshine = OfflineMoonshineModelConfig(
+                    encoder = path(LocalSttModel.Role.Encoder),
+                    mergedDecoder = path(LocalSttModel.Role.Decoder),
+                ),
+                tokens = path(LocalSttModel.Role.Tokens),
+                numThreads = threads,
             )
             LocalSttModel.Family.Moonshine -> OfflineModelConfig(
                 moonshine = OfflineMoonshineModelConfig(

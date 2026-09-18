@@ -7,6 +7,7 @@ import android.media.AudioTrack
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
@@ -59,9 +60,11 @@ class LocalTtsModel(
         private const val RELEASE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
 
         /**
-         * Ordered fastest → slowest by the real-time factor measured with the desktop sherpa-onnx 1.13.8 on
-         * one sentence (4 threads): Supertonic 0.05, Piper low 0.14, Kitten 0.27, Piper medium 0.33,
-         * Kokoro 1.3. A phone is slower in absolute terms; Settings shows the real numbers per voice.
+         * Tiny voices only (each a download of about 100 MB or less), ordered fastest to slowest by the real-time
+         * factor measured with desktop sherpa-onnx 1.13.8, 4 threads, on one sentence: Supertonic 0.05,
+         * Inflect nano 0.085, Piper low 0.15, Kitten nano 0.29, Piper medium 0.33. A phone is slower in absolute
+         * terms; Settings shows the real numbers per voice. Left out on purpose: Kokoro (103 MB, RTF 1.3, slower
+         * than real time even on a desktop) and Supertonic 3 (129 MB, RTF 0.27).
          */
         val all: List<LocalTtsModel> = listOf(
             LocalTtsModel(
@@ -73,6 +76,16 @@ class LocalTtsModel(
                 archiveBytes = 84_692_981,
                 archiveSha256 = "8c74359f63edd5045d47747f65331f0f6dbcbc91d7e898dd756d631295fe3259",
                 model = "vector_estimator.int8.onnx",
+            ),
+            LocalTtsModel(
+                id = "inflect-nano-en-v2",
+                label = "Inflect nano v2 (English)",
+                blurb = "Newest tiny voice, and the smallest download that is also quick.",
+                family = Family.Vits,
+                archiveName = "vits-inflect-en-nano-v2.tar.bz2",
+                archiveBytes = 22_429_639,
+                archiveSha256 = "9a6b1188b5f3be8813e0552056328495b4e88ffd1ef18ff837272bde7b3bc136",
+                model = "model.onnx",
             ),
             LocalTtsModel(
                 id = "piper-en_US-lessac-low-int8",
@@ -104,17 +117,6 @@ class LocalTtsModel(
                 archiveBytes = 20_969_179,
                 archiveSha256 = "f1c6d0295cf16087b05f80fdca5b44daca5cd78e2c425d419a42ba34929805f9",
                 model = "en_US-lessac-medium.onnx",
-            ),
-            LocalTtsModel(
-                id = "kokoro-int8-en-v0_19",
-                label = "Kokoro v0.19 (English)",
-                blurb = "Highest quality of these, but heavy: may not keep up in real time on a phone.",
-                family = Family.Kokoro,
-                archiveName = "kokoro-int8-en-v0_19.tar.bz2",
-                archiveBytes = 103_248_205,
-                archiveSha256 = "c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd",
-                model = "model.int8.onnx",
-                voices = "voices.bin",
             ),
         )
 
@@ -169,54 +171,6 @@ class LocalTtsStore private constructor(context: Context) : ModelStore<LocalTtsM
     }
 
     override fun releaseFromMemory(model: LocalTtsModel) = LocalTtsEngine.releaseIfLoaded(model.id)
-
-    /**
-     * Unpack a `.tar.bz2` into [dest], dropping the archive's single top-level folder. bzip2 is
-     * decoded in pure Java and is CPU-bound (~5 s per 67 MB on a fast desktop, several times that on
-     * a phone), so [onProgress] reports how much of the archive has been consumed.
-     */
-    private suspend fun unpack(archive: File, dest: File, onProgress: (Long) -> Unit) {
-        dest.mkdirs()
-        val base = dest.canonicalPath + File.separator
-        val source = BufferedInputStream(CountingInput(archive.inputStream(), onProgress))
-        TarArchiveInputStream(BZip2CompressorInputStream(source)).use { tar ->
-            val buf = ByteArray(64 * 1024)
-            while (true) {
-                val entry = tar.nextEntry ?: break
-                currentCoroutineContext().ensureActive()
-                val rel = entry.name.substringAfter('/', "")
-                if (rel.isEmpty()) continue
-                val out = File(dest, rel).canonicalFile
-                if (!out.path.startsWith(base)) throw IOException("Unsafe path in archive: ${entry.name}")
-                if (entry.isDirectory) { out.mkdirs(); continue }
-                if (!entry.isFile) continue // no symlinks or devices
-                out.parentFile?.mkdirs()
-                FileOutputStream(out).use { o ->
-                    while (true) {
-                        val n = tar.read(buf)
-                        if (n < 0) break
-                        o.write(buf, 0, n)
-                    }
-                }
-            }
-        }
-    }
-
-    /** Counts bytes read from the archive file, reporting every ~512 KB. */
-    private class CountingInput(input: InputStream, private val onBytes: (Long) -> Unit) : FilterInputStream(input) {
-        private var count = 0L
-        private var lastReport = 0L
-
-        override fun read(): Int = super.read().also { if (it >= 0) add(1) }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int =
-            super.read(b, off, len).also { if (it > 0) add(it.toLong()) }
-
-        private fun add(n: Long) {
-            count += n
-            if (count - lastReport >= 512 * 1024) { lastReport = count; onBytes(count) }
-        }
-    }
 
     companion object {
         private const val COMPLETE = ".complete"
@@ -366,36 +320,78 @@ internal object LocalTtsEngine {
  * engine, so it works on GrapheneOS. Audio is streamed to an [AudioTrack] as it is generated.
  * Single-flight like the other engines: a new [speak] or a [stop] invalidates the previous one.
  */
-class LocalTts(context: Context, modelId: String) : TtsEngine {
+class LocalTts(context: Context, modelId: String) : QueuedTts {
 
     private val store = LocalTtsStore.get(context)
     private val model = store.model(modelId)
     private val main = Handler(Looper.getMainLooper())
 
-    /** Bumped by every speak()/stop() so a stale synthesis or playback bails out. */
+    /** One sentence in flight. Frames are counted along the shared output track, across sentences. */
+    private class Item(
+        val text: String,
+        val gen: Int,
+        val onStart: () -> Unit,
+        val onDone: () -> Unit,
+        val onError: (String) -> Unit,
+    ) {
+        @Volatile var startFrame = -1L
+        @Volatile var endFrame = -1L // -1 until its synthesis has finished
+        @Volatile var deadlineMs = 0L // give up waiting for playback to reach endFrame after this
+        var started = false // main thread only
+    }
+
+    /** The output for one generation. stop() swaps in a fresh one, so a stale worker can't touch the next run's state. */
+    private class Out {
+        @Volatile var track: AudioTrack? = null
+        @Volatile var rate = 0
+        @Volatile var started = false // play() has been called
+        var fed = 0L // frames handed in, whether written to the track yet or still buffered
+        val pending = ArrayList<FloatArray>() // held back until PREBUFFER_S is queued, so a slow voice doesn't stutter
+        var pendingFrames = 0L
+    }
+
     @Volatile private var generation = 0
-    @Volatile private var track: AudioTrack? = null
+    @Volatile private var out = Out()
+
+    private val lock = Any()
+    private val waiting = java.util.ArrayDeque<Item>() // waiting for synthesis; guarded by lock
+    private val playing = ArrayList<Item>() // synthesizing or waiting to finish playing; guarded by lock
+    private var worker: Thread? = null // guarded by lock
 
     override fun speak(text: String, onDone: () -> Unit, onError: (String) -> Unit) {
-        val gen = ++generation
-        stopTrack()
+        stop()
+        enqueue(text, {}, onDone, onError)
+    }
+
+    override fun enqueue(text: String, onStart: () -> Unit, onDone: () -> Unit, onError: (String) -> Unit) {
         if (!store.isReady(model)) {
             main.post { onError("Voice “${model.label}” not downloaded") }
             return
         }
-        Thread {
-            try {
-                if (Playback(gen).run(text)) main.post { if (gen == generation) onDone() }
-            } catch (e: Throwable) {
-                // Stopped mid-write, or the model failed to load — only report the latter.
-                if (gen == generation) main.post { onError(e.message ?: "On-device voice failed") }
+        if (text.none { it.isLetterOrDigit() }) { // punctuation only: nothing to say, and nothing to synthesize
+            main.post { onStart(); onDone() }
+            return
+        }
+        main.removeCallbacks(idleClose)
+        val item = Item(text, generation, onStart, onDone, onError)
+        synchronized(lock) {
+            waiting.addLast(item)
+            if (worker == null) {
+                val gen = generation
+                val o = out
+                worker = Thread { workerLoop(gen, o) }.also { it.start() }
             }
-        }.start()
+        }
     }
 
     override fun stop() {
         generation++
-        stopTrack()
+        main.removeCallbacks(poll)
+        main.removeCallbacks(idleClose)
+        val old = out
+        out = Out()
+        synchronized(lock) { waiting.clear(); playing.clear(); worker = null }
+        closeTrack(old) // also unblocks a writer stuck on a full buffer
     }
 
     override fun shutdown() {
@@ -403,106 +399,183 @@ class LocalTts(context: Context, modelId: String) : TtsEngine {
         LocalTtsEngine.scheduleRelease() // keep the voice warm briefly for the next conversation
     }
 
-    /** Drop queued audio and unblock a writer stuck on a full buffer. */
-    private fun stopTrack() {
-        track?.let { runCatching { it.pause(); it.flush(); it.release() } }
-        track = null
+    // --- synthesis: one worker thread turns queued sentences into audio, ahead of playback ---
+
+    private fun workerLoop(gen: Int, o: Out) {
+        while (true) {
+            val item = synchronized(lock) {
+                if (gen != generation) return // stopped: a newer worker owns the queue now
+                waiting.pollFirst() ?: run { worker = null; return }
+            }
+            synthesize(item, gen, o)
+        }
     }
 
-    /**
-     * Plays one utterance. Starts the track only once ~[PREBUFFER_S] of audio is queued (or
-     * generation has finished), so a voice that synthesizes slower than real time doesn't stutter.
-     */
-    private inner class Playback(private val gen: Int) {
-        private var out: AudioTrack? = null
-        private val pending = ArrayList<FloatArray>()
-        private var queued = 0L
-        private var written = 0L
-        private var rate = 0
-
-        /** Returns true if it played to the end, false if it was stopped. */
-        fun run(text: String): Boolean {
+    private fun synthesize(item: Item, gen: Int, o: Out) {
+        var attempt = 0
+        while (gen == generation) {
+            val fedBefore = o.fed
             try {
-                LocalTtsEngine.generate(store, model, text) { chunk, sampleRate ->
-                    rate = sampleRate
-                    add(chunk)
+                val frames = speakInto(item, gen, o) ?: return // null: stopped
+                // A voice that "succeeds" with no audio is a failure too, not a silent skip.
+                if (frames == 0L) throw IllegalStateException("The voice produced no audio for this sentence")
+                finish(item, frames, o)
+                return
+            } catch (e: Throwable) {
+                if (gen != generation) return
+                Log.w(TAG, "voice failed (attempt ${attempt + 1}) on \"${item.text.take(40)}\"", e)
+                // Retry once with the model reloaded (a wedged native model is the likeliest cause), but only if
+                // nothing of this sentence reached the speaker yet: replaying would repeat the start of it.
+                if (attempt++ == 0 && o.fed == fedBefore) {
+                    LocalTtsEngine.release()
+                    continue
                 }
-                if (gen != generation) return false
-                if (out == null && !start()) return false
-                return drain()
-            } finally {
-                out?.let { t -> runCatching { t.release() }; if (track === t) track = null }
+                fail(item, e.message ?: e.javaClass.simpleName)
+                return
             }
         }
+    }
 
-        private fun add(chunk: FloatArray): Boolean {
+    /** Synthesize [item], streaming chunks into the shared output. Returns the frames produced, or null if stopped. */
+    private fun speakInto(item: Item, gen: Int, o: Out): Long? {
+        var produced = 0L
+        var stopped = false
+        LocalTtsEngine.generate(store, model, item.text) { chunk, sampleRate ->
+            if (gen != generation) { stopped = true; return@generate false }
+            if (produced == 0L) {
+                item.startFrame = o.fed
+                synchronized(lock) { playing += item }
+                main.post(poll) // the sentence is now in the playing list: start watching playback
+            }
+            o.rate = sampleRate
+            produced += chunk.size
+            if (feed(chunk, gen, o)) true else { stopped = true; false }
+        }
+        if (stopped || gen != generation) return null
+        // A short sentence never reached the prebuffer: start playing what there is.
+        if (!o.started && !startTrack(gen, o)) return null
+        return produced
+    }
+
+    private fun feed(chunk: FloatArray, gen: Int, o: Out): Boolean {
+        if (gen != generation || o.rate <= 0) return false
+        o.fed += chunk.size
+        if (!o.started) {
+            o.pending += chunk
+            o.pendingFrames += chunk.size
+            return if (o.pendingFrames >= o.rate * PREBUFFER_S) startTrack(gen, o) else true
+        }
+        return write(chunk, gen, o)
+    }
+
+    private fun startTrack(gen: Int, o: Out): Boolean {
+        if (gen != generation || o.rate <= 0) return false
+        val t = o.track ?: newTrack(o.rate).also { o.track = it }
+        t.play() // must be playing before writing: a blocking write to a stopped track never returns
+        o.started = true
+        for (c in o.pending) if (!write(c, gen, o)) return false
+        o.pending.clear()
+        o.pendingFrames = 0
+        return true
+    }
+
+    /** Blocking write into the track. It blocks once ~2 s is queued, which is what keeps synthesis from racing far ahead. */
+    private fun write(chunk: FloatArray, gen: Int, o: Out): Boolean {
+        val t = o.track ?: return false
+        var off = 0
+        while (off < chunk.size) {
             if (gen != generation) return false
-            if (out == null) {
-                pending += chunk
-                queued += chunk.size
-                return if (queued >= rate * PREBUFFER_S) start() else true
+            val n = t.write(chunk, off, chunk.size - off, AudioTrack.WRITE_BLOCKING)
+            if (n < 0) return false
+            off += n
+        }
+        return true
+    }
+
+    /** Synthesis finished: from here on the sentence is "done" once playback reaches its last frame. */
+    private fun finish(item: Item, frames: Long, o: Out) {
+        val head = o.track?.playbackHeadPosition?.toLong() ?: 0L
+        val ahead = (item.startFrame + frames - head).coerceAtLeast(0)
+        item.deadlineMs = SystemClock.elapsedRealtime() + ahead * 1000L / o.rate.coerceAtLeast(1) + 3_000
+        item.endFrame = item.startFrame + frames
+        main.post(poll)
+    }
+
+    /** The sentence could not be spoken: drop it from playback, tell the caller, and let the queue move on. */
+    private fun fail(item: Item, message: String) {
+        synchronized(lock) { playing.remove(item) }
+        main.post { if (item.gen == generation) item.onError(message) }
+    }
+
+    // --- playback progress: the main thread watches the track's head and reports sentences starting and finishing ---
+
+    private val poll = object : Runnable {
+        override fun run() {
+            main.removeCallbacks(this)
+            val o = out
+            val head = if (o.started) o.track?.playbackHeadPosition?.toLong() ?: 0L else -1L
+            val now = SystemClock.elapsedRealtime()
+            val starts = ArrayList<Item>()
+            val finished = ArrayList<Item>()
+            synchronized(lock) {
+                val it = playing.iterator()
+                while (it.hasNext()) {
+                    val item = it.next()
+                    if (item.gen != generation) { it.remove(); continue }
+                    if (!item.started && head >= item.startFrame && item.startFrame >= 0) { item.started = true; starts += item }
+                    if (item.endFrame >= 0 && ((head >= 0 && head >= item.endFrame) || now > item.deadlineMs)) {
+                        finished += item
+                        it.remove()
+                    }
+                }
             }
-            return write(chunk)
+            starts.forEach { it.onStart() }
+            finished.forEach { if (!it.started) it.onStart(); it.onDone() }
+            val busy = synchronized(lock) { playing.isNotEmpty() || waiting.isNotEmpty() || worker != null }
+            if (busy) main.postDelayed(this, POLL_MS) else main.postDelayed(idleClose, IDLE_CLOSE_MS)
         }
+    }
 
-        private fun start(): Boolean {
-            if (gen != generation) return false
-            val t = newTrack(rate)
-            out = t
-            track = t
-            t.play() // must be playing before writing: a blocking write to a stopped track never returns
-            for (c in pending) if (!write(c)) return false
-            pending.clear()
-            return true
+    /** Nothing queued for a while: release the audio track (the voice itself stays loaded). */
+    private val idleClose = Runnable {
+        val idle = synchronized(lock) { waiting.isEmpty() && playing.isEmpty() && worker == null }
+        if (idle) {
+            val old = out
+            out = Out()
+            closeTrack(old)
         }
+    }
 
-        private fun write(chunk: FloatArray): Boolean {
-            val t = out ?: return false
-            var off = 0
-            while (off < chunk.size) {
-                if (gen != generation) return false
-                val n = t.write(chunk, off, chunk.size - off, AudioTrack.WRITE_BLOCKING)
-                if (n < 0) return false
-                off += n
-            }
-            written += chunk.size
-            return true
-        }
+    private fun closeTrack(o: Out) {
+        o.track?.let { runCatching { it.pause(); it.flush(); it.release() } }
+        o.track = null
+    }
 
-        /** Wait for the queued audio to finish playing. */
-        private fun drain(): Boolean {
-            val t = out ?: return true // nothing was synthesized
-            val deadline = SystemClock.elapsedRealtime() + written * 1000L / rate + 2_000
-            while (gen == generation && t.playbackHeadPosition < written) {
-                if (SystemClock.elapsedRealtime() > deadline) break
-                Thread.sleep(20)
-            }
-            return gen == generation
-        }
-
-        private fun newTrack(sampleRate: Int): AudioTrack {
-            val minBuf = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-            return AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(maxOf(minBuf, sampleRate * 4 * 2)) // ~2 s of float samples
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-        }
+    private fun newTrack(sampleRate: Int): AudioTrack {
+        val minBuf = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+        return AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build(),
+            )
+            .setBufferSizeInBytes(maxOf(minBuf, sampleRate * 4 * 2)) // ~2 s of float samples
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
     }
 
     private companion object {
+        const val TAG = "LocalTts"
         const val PREBUFFER_S = 0.6
+        const val POLL_MS = 25L
+        const val IDLE_CLOSE_MS = 4_000L
     }
 }

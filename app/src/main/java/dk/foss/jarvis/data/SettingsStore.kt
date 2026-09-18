@@ -35,6 +35,8 @@ data class JarvisSettings(
     val localTtsModel: String = LocalTtsModel.DEFAULT_ID,
     /** In voice conversations, ask Hermes for short, speakable replies. */
     val voiceBrief: Boolean = true,
+    /** After each turn, fetch Hermes's stored reasoning and tool calls and add them to history. */
+    val showReasoning: Boolean = true,
     /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
     val voicePrompt: String = "",
     /** Which wake phrase to listen for: a bundled [dk.foss.jarvis.wake.WakeModel] id, or `custom`. */
@@ -69,6 +71,7 @@ class SettingsStore(private val context: Context) {
         val LOCAL_TTS = booleanPreferencesKey("local_tts")
         val LOCAL_TTS_MODEL = stringPreferencesKey("local_tts_model")
         val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
+        val SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
         val WAKE_MODEL = stringPreferencesKey("wake_model")
         val WAKE_CUSTOM_NAME = stringPreferencesKey("wake_custom_name")
@@ -94,6 +97,7 @@ class SettingsStore(private val context: Context) {
             useLocalTts = p[Keys.LOCAL_TTS] ?: false,
             localTtsModel = LocalTtsModel.byId(p[Keys.LOCAL_TTS_MODEL] ?: "").id,
             voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
+            showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
             wakeModel = p[Keys.WAKE_MODEL] ?: WakeModels.DEFAULT_ID,
             wakeCustomName = p[Keys.WAKE_CUSTOM_NAME] ?: "",
@@ -138,6 +142,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.WAKE_SENSITIVITY] = level.coerceIn(0, 2) }
     }
 
+    suspend fun updateShowReasoning(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.SHOW_REASONING] = enabled }
+    }
+
     suspend fun updateVoiceBrief(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.VOICE_BRIEF] = enabled }
     }
@@ -163,7 +171,8 @@ class SettingsStore(private val context: Context) {
     }
 
     companion object {
-        const val DEFAULT_MODEL = "mimo-v2.5-pro-ultraspeed"
+        /** Hermes's own name for "use whatever model the server is configured with". */
+        const val DEFAULT_MODEL = "hermes-agent"
         const val LEGACY_MODEL = "kimi-for-coding" // prior default; migrated to DEFAULT_MODEL
         const val DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"
 

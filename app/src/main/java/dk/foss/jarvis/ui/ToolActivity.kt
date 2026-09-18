@@ -1,14 +1,25 @@
 package dk.foss.jarvis.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,5 +87,34 @@ fun ToolLine(text: String, running: Boolean, done: Boolean, modifier: Modifier =
             modifier = Modifier.weight(1f, fill = false),
         )
         if (done) Text("✓", fontSize = 12.sp, color = JarvisColors.Muted, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+/** The model's reasoning for a turn (fetched from Hermes once the turn is done): two lines collapsed, all of it when tapped. */
+@Composable
+fun ReasoningBlock(text: String, modifier: Modifier = Modifier) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(
+        modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Reasoning", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.ThinkBlue)
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "Collapse reasoning" else "Expand reasoning",
+                tint = JarvisColors.Muted,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        Text(
+            text.trim(),
+            fontFamily = DmSans,
+            fontSize = 13.sp,
+            fontStyle = FontStyle.Italic,
+            color = JarvisColors.Muted,
+            maxLines = if (expanded) Int.MAX_VALUE else 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }

@@ -144,7 +144,9 @@ fun ChatScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(messages) { msg ->
-                            if (msg.role == UiMessage.ROLE_TOOL) {
+                            if (msg.role == UiMessage.ROLE_REASONING) {
+                                ReasoningBlock(msg.text)
+                            } else if (msg.role == UiMessage.ROLE_TOOL) {
                                 ToolLine(
                                     text = msg.text,
                                     running = msg.toolId != null && !msg.toolDone,
@@ -211,7 +213,7 @@ private fun MessageBubble(msg: UiMessage) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Text(
-                text = msg.text.ifEmpty { "\u2026" },
+                text = msg.text.trimStart().ifEmpty { "\u2026" },
                 color = textColor,
                 fontFamily = DmSans,
                 fontWeight = FontWeight.Normal,
