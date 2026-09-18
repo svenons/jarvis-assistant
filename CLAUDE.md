@@ -174,6 +174,12 @@ screens add `BackHandler { screen = Chat }`.
   the app forward (background-activity-launch limits). Unlocked background launch
   from `WakeWordService` relies on the `SYSTEM_ALERT_WINDOW` BAL exemption; locked
   launch uses a `CATEGORY_CALL` full-screen-intent notification.
+- **`AudioCapture`'s speech threshold is relative, and quiet speech is boosted.** "Speech" = RMS above
+  3× the room's ambient level (minimum over the last ~1 s of pre-speech frames, first 150 ms of mic
+  warm-up ignored), clamped to 250–700; it was a fixed 1000, which meant shouting next to the phone.
+  The ambient estimate freezes once speech starts. Before the WAV is written the utterance is amplified
+  toward RMS 3000 (gain 1–12×, clipped), which helps both local STT and Scribe. Each capture logs
+  `ambient / speech / gain` under the `AudioCapture` logcat tag — use it before retuning the constants.
 - **`AudioCapture` returns `onResult(null)` on near-silence** (needs
   `speechFrames >= MIN_SPEECH_FRAMES`, ~300 ms of real audio) because ElevenLabs
   Scribe hallucinates phantom phrases on near-silent audio. `ScribeRecognizer`
