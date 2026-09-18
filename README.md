@@ -169,10 +169,13 @@ Notes:
 The openWakeWord model files (`melspectrogram.onnx`, `embedding_model.onnx`,
 `hey_jarvis_v0.1.onnx`) live in `app/src/main/assets/` and are included.
 
-### Signed release
+### Releases
 
-The shipped APK is debug-signed (fine for sideloading). For a release build, add
-a `signingConfig` with your keystore and run `./gradlew :app:assembleRelease`.
+The APK in `dist/` is debug-signed (fine for a one-off sideload). Merges to `master` publish a versioned debug
+APK to the repository's **Releases** page automatically; see [CI and releases](docs/releasing.md) for how
+versions are chosen. Every debug build is signed with the committed `app/debug.keystore` (a public debug key),
+so each release installs as a plain update over the last. If you have a debug build signed with a different
+key installed, uninstall it once first.
 
 ## Architecture
 

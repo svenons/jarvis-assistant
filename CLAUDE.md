@@ -44,6 +44,29 @@ JDK 17 + Android SDK platform 34 / build-tools 34. `local.properties` needs
 There are no unit/instrumentation tests in this repo; verification = a clean
 compile + the running app on a device.
 
+## CI and releases
+
+Two workflows in `.github/workflows/`: **Build** (PRs into `master` → `:app:assembleDebug`) and **Release**
+(push to `master`, or manual with a bump type → debug APK + tag + GitHub Release). No build artifacts are
+uploaded anywhere. Details and the tested/untested list are in [`docs/releasing.md`](docs/releasing.md). What
+matters when editing:
+
+- **Versioning is by tag, computed from commit messages** (`.github/scripts/next-version.sh`): `type!:` /
+  `BREAKING CHANGE:` → major, `feat:` → minor, anything else → patch; first release is `0.1.0`. Write PR
+  titles as conventional commits (they become the squash-merge message). `versionCode` =
+  `MAJOR*1000000 + MINOR*1000 + PATCH`. `app/build.gradle` takes `-PappVersionName` / `-PappVersionCode` and
+  defaults to `0.1.0` / `1`; don't hand-edit those defaults to cut a release.
+- **Releases are debug builds** (`dk.foss.jarvis.debug`, `X.Y.Z-debug`), deliberately: this is a sideloaded
+  app. Every debug build (local and CI) is signed with the committed `app/debug.keystore` — the standard
+  auto-generated Android debug key (`android` / `androiddebugkey`), copied from the maintainer's
+  `~/.android/debug.keystore` and public by design — so a release installs over the previous one and over
+  local builds. Without it each CI runner would invent a new debug key and no release could update the last.
+  `.gitignore` un-ignores that one keystore (`!app/debug.keystore`); don't add a *private* key next to it,
+  don't reuse it for anything real, and don't add release-signing machinery (secrets, `signingConfigs.release`)
+  without being asked.
+- The Release workflow verifies package, `versionCode`, `versionName` and that the signing certificate equals
+  `app/debug.keystore`'s before publishing.
+
 ## Toolchain & versions (keep aligned)
 
 - AGP **8.2.2**, Kotlin **1.9.22** (the `kotlin.android` and

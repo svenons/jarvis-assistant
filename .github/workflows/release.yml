@@ -1,0 +1,127 @@
+name: Release
+
+# On every merge to master: work out the next version from the commits, build the debug APK and publish it
+# as a GitHub Release. Docs-only changes don't cut a release. Run it by hand (Actions -> Release -> Run
+# workflow) to force a bump type.
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump (auto reads the commit messages since the last release)
+        type: choice
+        options: [auto, major, minor, patch]
+        default: auto
+
+# Releases are cut one at a time, in order; a newer merge waits instead of cancelling.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the tag and the release
+
+jobs:
+  release:
+    name: Build and publish
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the version script needs every tag and commit
+
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: .github/scripts/next-version.sh | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: steps.version.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.version.outputs.skip != 'true'
+
+      - name: Build debug APK
+        if: steps.version.outputs.skip != 'true'
+        run: >
+          ./gradlew :app:assembleDebug --stacktrace
+          -PappVersionName=${{ steps.version.outputs.version }}
+          -PappVersionCode=${{ steps.version.outputs.code }}
+
+      - name: Verify the APK
+        id: apk
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CODE: ${{ steps.version.outputs.code }}
+        run: |
+          src=app/build/outputs/apk/debug/app-debug.apk
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+
+          # The version really made it into the manifest (debug builds add a "-debug" suffix).
+          badging="$("$build_tools/aapt2" dump badging "$src")"
+          grep -q "package: name='dk.foss.jarvis.debug' versionCode='$CODE' versionName='$VERSION-debug'" <<<"$badging" \
+            || { echo "unexpected package/version in APK:"; grep '^package:' <<<"$badging"; exit 1; }
+
+          # Signed with the committed debug key (app/debug.keystore), so it installs over earlier releases
+          # and over builds from the maintainer's machine, rather than with a key the runner made up.
+          "$build_tools/apksigner" verify --print-certs "$src" | tee "$RUNNER_TEMP/certs.txt"
+          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")"
+          expected="$(keytool -list -v -keystore app/debug.keystore -storepass android 2>/dev/null \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')"
+          [ -n "$actual" ] && [ "$actual" = "$expected" ] \
+            || { echo "APK is not signed with app/debug.keystore (got '$actual', expected '$expected')"; exit 1; }
+
+          out="jarvis-v$VERSION-debug.apk"
+          cp "$src" "$out"
+          sha256sum "$out" > "$out.sha256"
+          echo "apk=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          APK: ${{ steps.apk.outputs.apk }}
+        run: |
+          {
+            echo "**Install:** download \`$APK\` and sideload it (allow *Install unknown apps* for your browser or file manager)."
+            echo "Needs Android 10 or newer on an ARM phone. This is a debug build that installs as \`dk.foss.jarvis.debug\`. All releases are signed with the same debug key, so each installs as a plain update over the previous one."
+            echo
+            echo "Verify the download: \`sha256sum -c $APK.sha256\`"
+            echo
+          } > "$RUNNER_TEMP/notes.md"
+
+          # GitHub's generated notes (merged PRs and contributors since the last release), appended below.
+          generated="$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            ${PREVIOUS:+-f previous_tag_name="$PREVIOUS"} --jq .body || true)"
+          printf '%s\n' "$generated" >> "$RUNNER_TEMP/notes.md"
+
+          gh release create "$TAG" "$APK" "$APK.sha256" \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
+
+      - name: Summary
+        if: always()
+        env:
+          SKIP: ${{ steps.version.outputs.skip }}
+          TAG: ${{ steps.version.outputs.tag }}
+          BUMP: ${{ steps.version.outputs.bump }}
+        run: |
+          if [ "$SKIP" = true ]; then
+            echo "This commit is already released; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Released $TAG ($BUMP bump)" >> "$GITHUB_STEP_SUMMARY"
+          fi
