@@ -211,7 +211,8 @@ private fun IdleContent(hasPermission: Boolean, hint: String?, onMicTap: () -> U
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            StatusTag("WAKE WORD ACTIVE", JarvisColors.Cyan)
+            // Only when the wake word is on in Settings (Branding.wakePhrase is null otherwise).
+            if (LocalBranding.current.wakePhrase != null) StatusTag("WAKE WORD ACTIVE", JarvisColors.Cyan)
 
             // Glowing mic button with pulse ring
             Box(contentAlignment = Alignment.Center) {

@@ -25,6 +25,8 @@ data class JarvisSettings(
     val elevenKey: String,
     val elevenVoiceId: String,
     val wakeEnabled: Boolean,
+    /** Keep listening when the app is closed or the screen is off (a persistent mic notification). Off = only while the app is open. */
+    val wakeBackground: Boolean = true,
     /** Transcribe on-device (sherpa-onnx). When set, audio never falls back to a cloud STT. */
     val useLocalStt: Boolean = false,
     /** Which [dk.foss.jarvis.voice.LocalSttModel] to use for on-device STT (its `id`). */
@@ -66,6 +68,7 @@ class SettingsStore(private val context: Context) {
         val ELEVEN_KEY = stringPreferencesKey("eleven_key")
         val ELEVEN_VOICE = stringPreferencesKey("eleven_voice")
         val WAKE_ENABLED = booleanPreferencesKey("wake_enabled")
+        val WAKE_BACKGROUND = booleanPreferencesKey("wake_background")
         val LOCAL_STT = booleanPreferencesKey("local_stt")
         val LOCAL_STT_MODEL = stringPreferencesKey("local_stt_model")
         val LOCAL_TTS = booleanPreferencesKey("local_tts")
@@ -91,6 +94,7 @@ class SettingsStore(private val context: Context) {
             elevenVoiceId = (p[Keys.ELEVEN_VOICE] ?: "")
                 .ifEmpty { BuildConfig.DEFAULT_ELEVEN_VOICE.ifEmpty { DEFAULT_ELEVEN_VOICE } },
             wakeEnabled = p[Keys.WAKE_ENABLED] ?: false,
+            wakeBackground = p[Keys.WAKE_BACKGROUND] ?: true, // before this existed, wake was always background
             useLocalStt = p[Keys.LOCAL_STT] ?: false,
             // byId falls back to the default if a stored id no longer exists in the catalog.
             localSttModel = LocalSttModel.byId(p[Keys.LOCAL_STT_MODEL] ?: "").id,
@@ -108,6 +112,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun updateWake(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.WAKE_ENABLED] = enabled }
+    }
+
+    suspend fun updateWakeBackground(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.WAKE_BACKGROUND] = enabled }
     }
 
     suspend fun updateLocalStt(enabled: Boolean) {

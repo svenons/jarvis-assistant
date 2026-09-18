@@ -37,9 +37,15 @@ import java.io.InputStream
 class LocalTtsModel(
     val id: String,
     val label: String,
-    /** One line for the picker. Deliberately no speed numbers — the app measures those. */
+    /** One line for the picker. The speed numbers live in [desktopRtf]; the app also measures the real ones. */
     val blurb: String,
     val family: Family,
+    /** When this build was published (not when the original voice was trained). */
+    val year: Int,
+    /** Published quality for the picker, e.g. "MOS 4.44"; blank when there is no source I could point to. */
+    val score: String = "",
+    /** Measured real-time factor with desktop sherpa-onnx 1.13.8, 4 threads, on one sentence (lower is faster). */
+    val desktopRtf: Double,
     archiveName: String,
     val archiveBytes: Long,
     val archiveSha256: String,
@@ -53,6 +59,9 @@ class LocalTtsModel(
 
     val archiveUrl: String = "$RELEASE_URL/$archiveName"
 
+    /** The picker's fact line, e.g. "2026 · MOS 4.32 · 0.18× real time on a desktop". */
+    val meta: String = modelMeta(year, score, desktopRtf)
+
     companion object {
         /** Persisted in settings; also the folder name, so it must stay stable across versions. */
         const val DEFAULT_ID = "piper-en_US-lessac-medium-int8"
@@ -60,18 +69,19 @@ class LocalTtsModel(
         private const val RELEASE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
 
         /**
-         * Tiny voices only (each a download of about 100 MB or less), ordered fastest to slowest by the real-time
-         * factor measured with desktop sherpa-onnx 1.13.8, 4 threads, on one sentence: Supertonic 0.05,
-         * Inflect nano 0.085, Piper low 0.15, Kitten nano 0.29, Piper medium 0.33. A phone is slower in absolute
-         * terms; Settings shows the real numbers per voice. Left out on purpose: Kokoro (103 MB, RTF 1.3, slower
-         * than real time even on a desktop) and Supertonic 3 (129 MB, RTF 0.27).
+         * Ordered fastest to slowest by [desktopRtf] (a phone is slower in absolute terms; Settings shows the real
+         * numbers per voice once one has been used). Left out on purpose because they are too slow: Piper high (RTF
+         * 1.4), Kitten mini (0.58), and Pocket TTS (needs a reference voice). Scores are the published MOS where I
+         * found one; blank means I found no source, not that the voice is bad.
          */
         val all: List<LocalTtsModel> = listOf(
             LocalTtsModel(
                 id = "supertonic-en-int8",
                 label = "Supertonic (English)",
-                blurb = "Built for speed: the quickest of these in testing.",
+                blurb = "Built for speed: the quickest voice here.",
                 family = Family.Supertonic,
+                year = 2026,
+                desktopRtf = 0.05,
                 archiveName = "sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2",
                 archiveBytes = 84_692_981,
                 archiveSha256 = "8c74359f63edd5045d47747f65331f0f6dbcbc91d7e898dd756d631295fe3259",
@@ -80,8 +90,10 @@ class LocalTtsModel(
             LocalTtsModel(
                 id = "inflect-nano-en-v2",
                 label = "Inflect nano v2 (English)",
-                blurb = "Newest tiny voice, and the smallest download that is also quick.",
+                blurb = "Newest tiny voice and the smallest quick download. Its first version was reviewed as robotic; this one I found no review of.",
                 family = Family.Vits,
+                year = 2026,
+                desktopRtf = 0.06,
                 archiveName = "vits-inflect-en-nano-v2.tar.bz2",
                 archiveBytes = 22_429_639,
                 archiveSha256 = "9a6b1188b5f3be8813e0552056328495b4e88ffd1ef18ff837272bde7b3bc136",
@@ -92,16 +104,69 @@ class LocalTtsModel(
                 label = "Piper Lessac low (US English)",
                 blurb = "Small and quick; lower audio quality (16 kHz).",
                 family = Family.Vits,
+                year = 2025,
+                desktopRtf = 0.15,
                 archiveName = "vits-piper-en_US-lessac-low-int8.tar.bz2",
                 archiveBytes = 21_070_568,
                 archiveSha256 = "af63fbe60d8bdcfccdee61ba057304a11dfc077145da383d4d351ec3c594d5e2",
                 model = "en_US-lessac-low.onnx",
             ),
             LocalTtsModel(
+                id = "piper-en_US-ryan-low-int8",
+                label = "Piper Ryan low (US English)",
+                blurb = "Small and quick, a male voice; lower audio quality (16 kHz).",
+                family = Family.Vits,
+                year = 2025,
+                desktopRtf = 0.16,
+                archiveName = "vits-piper-en_US-ryan-low-int8.tar.bz2",
+                archiveBytes = 21_212_659,
+                archiveSha256 = "659a39069edef4f0a64fa16119fa1e36c9b9644839a61aed73872f16c2e7ecb2",
+                model = "en_US-ryan-low.onnx",
+            ),
+            LocalTtsModel(
+                id = "supertonic-3-en-int8",
+                label = "Supertonic 3 (English)",
+                blurb = "Newer and more natural than Supertonic, about 130 MB, still quicker than real time.",
+                family = Family.Supertonic,
+                year = 2026,
+                score = "MOS 4.32",
+                desktopRtf = 0.18,
+                archiveName = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2",
+                archiveBytes = 128_774_318,
+                archiveSha256 = "82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427",
+                model = "vector_estimator.int8.onnx",
+            ),
+            LocalTtsModel(
+                id = DEFAULT_ID,
+                label = "Piper Lessac medium (US English)",
+                blurb = "Clear and light.",
+                family = Family.Vits,
+                year = 2025,
+                desktopRtf = 0.2,
+                archiveName = "vits-piper-en_US-lessac-medium-int8.tar.bz2",
+                archiveBytes = 20_969_179,
+                archiveSha256 = "f1c6d0295cf16087b05f80fdca5b44daca5cd78e2c425d419a42ba34929805f9",
+                model = "en_US-lessac-medium.onnx",
+            ),
+            LocalTtsModel(
+                id = "piper-en_US-libritts_r-medium-int8",
+                label = "Piper LibriTTS-R medium (US English)",
+                blurb = "Clear and light; trained on many speakers, so it sounds more varied than Lessac.",
+                family = Family.Vits,
+                year = 2025,
+                desktopRtf = 0.21,
+                archiveName = "vits-piper-en_US-libritts_r-medium-int8.tar.bz2",
+                archiveBytes = 23_398_348,
+                archiveSha256 = "7e4552e239988f4896872822b56e99e0e9e00958164e3f6bdf5ee14391fbe829",
+                model = "en_US-libritts_r-medium.onnx",
+            ),
+            LocalTtsModel(
                 id = "kitten-nano-en-v0_8-int8",
                 label = "Kitten nano v0.8 (English)",
                 blurb = "Tiny model.",
                 family = Family.Kitten,
+                year = 2026,
+                desktopRtf = 0.29,
                 archiveName = "kitten-nano-en-v0_8-int8.tar.bz2",
                 archiveBytes = 31_220_690,
                 archiveSha256 = "6fa5be852612ce761094ba74ee6123b4fc4acfefa79bf64dc63acae4a83af2fd",
@@ -109,14 +174,31 @@ class LocalTtsModel(
                 voices = "voices.bin",
             ),
             LocalTtsModel(
-                id = DEFAULT_ID,
-                label = "Piper Lessac medium (US English)",
-                blurb = "Clear and light.",
-                family = Family.Vits,
-                archiveName = "vits-piper-en_US-lessac-medium-int8.tar.bz2",
-                archiveBytes = 20_969_179,
-                archiveSha256 = "f1c6d0295cf16087b05f80fdca5b44daca5cd78e2c425d419a42ba34929805f9",
-                model = "en_US-lessac-medium.onnx",
+                id = "kitten-micro-en-v0_8",
+                label = "Kitten micro v0.8 (English)",
+                blurb = "A step up from nano: a bit bigger and a bit slower.",
+                family = Family.Kitten,
+                year = 2026,
+                desktopRtf = 0.33,
+                archiveName = "kitten-micro-en-v0_8.tar.bz2",
+                archiveBytes = 44_423_643,
+                archiveSha256 = "85faaea7511ca9d1d2f251fed0a4553bdf0d1ee046102fa60ddd8046c751f76f",
+                model = "model.onnx",
+                voices = "voices.bin",
+            ),
+            LocalTtsModel(
+                id = "kokoro-int8-en-v0_19",
+                label = "Kokoro v0.19 (English)",
+                blurb = "Highest quality of these, but heavy: slower than real time even on a desktop, so it may not keep up on a phone.",
+                family = Family.Kokoro,
+                year = 2025,
+                score = "MOS 4.44",
+                desktopRtf = 1.3,
+                archiveName = "kokoro-int8-en-v0_19.tar.bz2",
+                archiveBytes = 103_248_205,
+                archiveSha256 = "c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd",
+                model = "model.int8.onnx",
+                voices = "voices.bin",
             ),
         )
 
@@ -411,50 +493,58 @@ class LocalTts(context: Context, modelId: String) : QueuedTts {
         }
     }
 
+    /**
+     * Synthesize [item] completely, THEN play it. Buffering the whole sentence is what makes a retry clean: nothing
+     * of a failed attempt has reached the speaker. Attempts, in order: as-is; model reloaded; two halves; symbols
+     * stripped. Only if all of them fail is the sentence reported (and skipped).
+     */
     private fun synthesize(item: Item, gen: Int, o: Out) {
-        var attempt = 0
-        while (gen == generation) {
-            val fedBefore = o.fed
-            try {
-                val frames = speakInto(item, gen, o) ?: return // null: stopped
-                // A voice that "succeeds" with no audio is a failure too, not a silent skip.
-                if (frames == 0L) throw IllegalStateException("The voice produced no audio for this sentence")
-                finish(item, frames, o)
-                return
-            } catch (e: Throwable) {
-                if (gen != generation) return
-                Log.w(TAG, "voice failed (attempt ${attempt + 1}) on \"${item.text.take(40)}\"", e)
-                // Retry once with the model reloaded (a wedged native model is the likeliest cause), but only if
-                // nothing of this sentence reached the speaker yet: replaying would repeat the start of it.
-                if (attempt++ == 0 && o.fed == fedBefore) {
-                    LocalTtsEngine.release()
-                    continue
-                }
-                fail(item, e.message ?: e.javaClass.simpleName)
-                return
+        val attempts = listOf<() -> List<FloatArray>?>(
+            { generate(item.text, gen, o) },
+            { LocalTtsEngine.release(); generate(item.text, gen, o) },
+            {
+                LocalTtsEngine.release()
+                val halves = TtsRetry.splitInHalf(item.text)
+                val out = ArrayList<FloatArray>()
+                for (part in halves) out += generate(part, gen, o) ?: return@listOf null
+                out
+            },
+            { LocalTtsEngine.release(); generate(TtsRetry.simplify(item.text), gen, o) },
+        )
+        val audio = try {
+            TtsRetry.firstSuccess(attempts) { i, e ->
+                Log.w(TAG, "voice failed (attempt ${i + 1} of ${attempts.size}) on \"${item.text.take(40)}\"", e)
             }
+        } catch (e: Throwable) {
+            if (gen == generation) fail(item, e.message ?: e.javaClass.simpleName)
+            return
+        } ?: return // stopped
+        if (gen != generation) return
+
+        item.startFrame = o.fed
+        synchronized(lock) { playing += item }
+        main.post(poll)
+        var frames = 0L
+        for (chunk in audio) {
+            frames += chunk.size
+            if (!feed(chunk, gen, o)) return
         }
+        // A short sentence never reached the prebuffer: start playing what there is.
+        if (!o.started && !startTrack(gen, o)) return
+        finish(item, frames, o)
     }
 
-    /** Synthesize [item], streaming chunks into the shared output. Returns the frames produced, or null if stopped. */
-    private fun speakInto(item: Item, gen: Int, o: Out): Long? {
-        var produced = 0L
+    /** One synthesis of [text]. Returns its audio, or null if the voice was stopped meanwhile. Throws if the voice fails. */
+    private fun generate(text: String, gen: Int, o: Out): List<FloatArray>? {
+        val chunks = ArrayList<FloatArray>()
         var stopped = false
-        LocalTtsEngine.generate(store, model, item.text) { chunk, sampleRate ->
+        LocalTtsEngine.generate(store, model, text) { chunk, sampleRate ->
             if (gen != generation) { stopped = true; return@generate false }
-            if (produced == 0L) {
-                item.startFrame = o.fed
-                synchronized(lock) { playing += item }
-                main.post(poll) // the sentence is now in the playing list: start watching playback
-            }
             o.rate = sampleRate
-            produced += chunk.size
-            if (feed(chunk, gen, o)) true else { stopped = true; false }
+            chunks += chunk
+            true
         }
-        if (stopped || gen != generation) return null
-        // A short sentence never reached the prebuffer: start playing what there is.
-        if (!o.started && !startTrack(gen, o)) return null
-        return produced
+        return if (stopped || gen != generation) null else chunks
     }
 
     private fun feed(chunk: FloatArray, gen: Int, o: Out): Boolean {

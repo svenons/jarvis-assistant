@@ -140,6 +140,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 
     var wakeEnabled by remember { mutableStateOf(false) }
+    var wakeBackground by remember { mutableStateOf(true) }
     var localStt by remember { mutableStateOf(false) }
     val sttStore = remember { LocalSttStore.get(context) }
     val sttStates by sttStore.states.collectAsState()
@@ -243,7 +244,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         scope.launch { store.updateWake(true) }
         WakeWordService.start(context)
         wakeEnabled = true
-        if (!overlayGranted) requestOverlay() else if (!batteryExempt) requestBattery()
+        if (!overlayGranted) requestOverlay() else if (wakeBackground && !batteryExempt) requestBattery()
     }
 
     val wakePermLauncher = rememberLauncherForActivityResult(
@@ -285,6 +286,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         elevenKey = s.elevenKey
         elevenVoice = s.elevenVoiceId
         wakeEnabled = s.wakeEnabled
+        wakeBackground = s.wakeBackground
         localStt = s.useLocalStt
         sttModelId = s.localSttModel
         localTts = s.useLocalTts
@@ -791,7 +793,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text(
                     "Runs on the phone — no network and no Google speech service, so it works on " +
                         "GrapheneOS. Speed is measured on this phone from real use: below 1.00× real " +
-                        "time is faster than real time. A change applies from the next conversation.",
+                        "time is faster than real time. Under each model: the year that build was published, " +
+                        "a published accuracy score where one exists (WER: lower is better; MOS: higher is " +
+                        "better), and its speed on a desktop; a phone is slower. Lists run quickest first. " +
+                        "A change applies from the next conversation.",
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
@@ -816,6 +821,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         ModelRow(
                             label = m.label,
                             blurb = m.blurb,
+                            meta = m.meta,
                             sizeMb = m.totalBytes / 1_000_000,
                             state = sttStates[m.id] ?: ModelState.Missing,
                             selected = m.id == sttModelId,
@@ -850,6 +856,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         ModelRow(
                             label = m.label,
                             blurb = m.blurb,
+                            meta = m.meta,
                             sizeMb = m.archiveBytes / 1_000_000,
                             state = ttsStates[m.id] ?: ModelState.Missing,
                             selected = m.id == ttsModelId,
@@ -893,7 +900,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                             color = JarvisColors.TextPrimary,
                         )
                         Text(
-                            "Always-on listening (foreground service). Uses battery + a persistent notification.",
+                            "Listen for the wake phrase while the app is open.",
                             fontFamily = DmSans,
                             fontSize = 12.sp,
                             color = JarvisColors.Muted,
@@ -902,6 +909,39 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Switch(
                         checked = wakeEnabled,
                         onCheckedChange = { toggleWake(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Keep listening in the background",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = if (wakeEnabled) JarvisColors.TextPrimary else JarvisColors.Muted,
+                        )
+                        Text(
+                            "Also listen with the app closed and the screen off, and restart when the phone does. " +
+                                "Uses battery and shows a persistent notification. Off: it stops when you leave the app.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = wakeBackground,
+                        enabled = wakeEnabled,
+                        onCheckedChange = {
+                            wakeBackground = it
+                            scope.launch { store.updateWakeBackground(it) }
+                        },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = JarvisColors.Cyan,
                             checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
@@ -943,7 +983,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 if (wakeEnabled && !overlayGranted) {
                     NeutralButton("Allow \u201Cdisplay over other apps\u201D (needed to open on wake)") { requestOverlay() }
                 }
-                if (wakeEnabled && !batteryExempt) {
+                if (wakeEnabled && wakeBackground && !batteryExempt) {
                     NeutralButton("Allow background activity (keep listening always-on)") { requestBattery() }
                 }
 
@@ -1235,6 +1275,8 @@ private fun percent(done: Long, total: Long): Int = if (total > 0) (done * 100 /
 private fun ModelRow(
     label: String,
     blurb: String,
+    /** Year, published score and desktop speed, e.g. "2026 · WER 5.9% · 0.07× real time on a desktop". */
+    meta: String,
     sizeMb: Long,
     state: ModelState,
     selected: Boolean,
@@ -1264,6 +1306,7 @@ private fun ModelRow(
             Column(Modifier.weight(1f).padding(start = 4.dp)) {
                 Text(label, fontFamily = DmSans, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = JarvisColors.TextPrimary)
                 Text(blurb, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted)
+                Text(meta, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextSecondary)
                 val (status, color) = when (state) {
                     is ModelState.Ready -> "Ready · $sizeMb MB${detail?.let { " · $it" } ?: ""}" to JarvisColors.CyanText
                     is ModelState.Downloading ->

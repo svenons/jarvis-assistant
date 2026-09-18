@@ -379,7 +379,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     cut = i; break
                 }
             }
-            if (cut < 0 && s.length > 180) { // soft cap so one long clause still starts early
+            // Soft cap so one long clause still starts early. The FIRST piece of a reply is cut shorter: a voice
+            // synthesizes a whole sentence before playing it (so a failed one can be retried cleanly), and the wait
+            // before the first sound is that first piece's synthesis time.
+            val cap = if (segments.isEmpty()) FIRST_PIECE_MAX_CHARS else 180
+            if (cut < 0 && s.length > cap) {
                 val sp = s.lastIndexOf(' ')
                 if (sp > 40) cut = sp
             }
@@ -572,6 +576,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 "deletes something, spends money or controls a device (for example sending an email, writing or " +
                 "deleting a file, or changing a setting), do not do it yet: say briefly that it needs the phone " +
                 "unlocked, and ask them to unlock it and ask again."
+        const val FIRST_PIECE_MAX_CHARS = 90
         const val IDLE_FLUSH_MS = 350L
         const val STALL_MS = 800L
         const val WAKE_REARM_DELAY_MS = 1200L

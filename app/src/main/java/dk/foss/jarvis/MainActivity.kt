@@ -75,8 +75,10 @@ class MainActivity : ComponentActivity() {
             assistEpoch++
             showOverLockScreen()
         }
-        rearmWakeWord()
         refreshLocked()
+        lifecycleScope.launch {
+            SettingsStore(this@MainActivity).settings.collect { wakeInBackground = it.wakeBackground }
+        }
         ContextCompat.registerReceiver(
             this, lockStateReceiver,
             IntentFilter(Intent.ACTION_USER_PRESENT).apply { addAction(Intent.ACTION_SCREEN_OFF) },
@@ -175,7 +177,22 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    /** If the wake word is enabled, make sure the always-on listener is running. */
+    // Whether the wake listener keeps running once the app is out of sight (Settings → Wake word). Kept here so
+    // onStop can act on it immediately; the service can't be stopped from a coroutine that onDestroy may cancel.
+    @Volatile private var wakeInBackground = true
+
+    override fun onStart() {
+        super.onStart()
+        rearmWakeWord()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // "Only while the app is open": stop listening when it leaves the screen (not on a rotation).
+        if (!wakeInBackground && !isChangingConfigurations) WakeWordService.stop(this)
+    }
+
+    /** If the wake word is enabled, make sure the listener is running while the app is open. */
     private fun rearmWakeWord() {
         lifecycleScope.launch {
             val s = SettingsStore(this@MainActivity).settings.first()

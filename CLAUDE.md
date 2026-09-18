@@ -96,11 +96,11 @@ mechanism behind an interface.
 | Wire protocol | `hermes/HermesClient.kt`, `hermes/Models.kt` | **Only** Hermes coupling. OkHttp SSE → `/v1/chat/completions`; `/v1/models` for the connection test. |
 | Shared HTTP | `net/Http.kt` | `Http.base` (bounded timeouts) + `Http.streaming` (`readTimeout(0)` for SSE, derived from `base`). Reuse these — never build a new `OkHttpClient`. |
 | Persistence | `data/SettingsStore.kt` (DataStore prefs), `data/ConversationStore.kt` (one JSON file per conversation), `data/ConversationRepository.kt` (singleton source of truth) | Settings = DataStore; conversations = `filesDir/conversations/<id>.json`. Don't mix. |
-| STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs), `voice/LocalRecognizer.kt` + `voice/LocalSttModel.kt` (fully on-device, sherpa-onnx; catalog of Moonshine / Whisper / Parakeet models) | Three backends behind one interface. |
-| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium), `voice/LocalTts.kt` (on-device sherpa-onnx voices: Supertonic / Piper / Kitten / Kokoro) | Three backends behind one interface. |
+| STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs), `voice/LocalRecognizer.kt` + `voice/LocalSttModel.kt` (fully on-device, sherpa-onnx; catalog of tiny → large models, see below) | Three backends behind one interface. |
+| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium), `voice/LocalTts.kt` (on-device sherpa-onnx voices: Supertonic / Inflect / Piper / Kitten / Kokoro) | Three backends behind one interface. |
 | Model downloads | `voice/ModelStore.kt` | Shared base for `LocalSttStore` / `LocalTtsStore`: resumable, SHA-256-verified downloads + per-model `ModelState`. |
 | Voice loop | `ui/ConversationViewModel.kt` | `ConvState` Idle→Listening→Thinking→Speaking; recognition, streaming, sentence extraction, single-flight TTS pump, turn invalidation, wake re-arm. |
-| Wake word | `wake/WakeWordService.kt`, `wake/BootReceiver.kt` | openWakeWord foreground mic service; launches the app on "Hey Jarvis". |
+| Wake word | `wake/WakeWordService.kt`, `wake/BootReceiver.kt` | openWakeWord foreground mic service; launches the app on "Hey Jarvis". Two Settings toggles: `wakeEnabled` (listen while the app is open; `MainActivity` starts it in `onStart`) and `wakeBackground` (keep listening once the app is closed; without it `onStop` stops the service, and `BootReceiver` only restarts it when both are on). |
 | Assistant integration | `assist/JarvisInteractionService.kt`, `JarvisInteractionSessionService.kt`, `JarvisInteractionSession.kt`, `JarvisRecognitionService.kt` | `VoiceInteractionService` so Jarvis can be the default assistant. |
 | UI / design | `MainActivity.kt`, `ui/*Screen.kt`, `ui/Theme.kt`, `ui/JarvisDesign.kt` | Compose screens + the "Direction A" design system. |
 
@@ -137,10 +137,17 @@ screens add `BackHandler { screen = Chat }`.
   failure). No-match / speech-timeout / blank transcript = `transient=false` so
   the loop goes idle instead of retrying. The VM retries a transient error
   exactly once per turn (450 ms delay).
-- **TTS is single-flight.** `pump()` guards with `if (speaking) return` and only
-  advances from `speak`'s `onDone`/`onError`. Premium-TTS failure on one sentence
-  falls back to `AndroidTts` for that sentence, then continues. Serialize
-  sentences via the callback — never call `speak` in a loop.
+- **TTS is single-flight, except voices that queue.** For `AndroidTts` / `ElevenLabsTts`, `pump()` guards
+  with `if (speaking) return` and only advances from `speak`'s `onDone`/`onError`; a premium-TTS failure on
+  one sentence falls back to `AndroidTts` for that sentence. Never call `speak` in a loop. A voice that
+  implements `QueuedTts` (`LocalTts`) instead gets every sentence the moment it exists via `enqueue()`
+  (`ConversationViewModel.speakQueued`): it synthesizes the next sentence while the current one plays and
+  writes all of them into one continuous `AudioTrack`, so there is no gap between sentences. The old
+  one-sentence-at-a-time flow paid thread start + synthesis + a 0.6 s prebuffer + a new track between every
+  pair of sentences. In queued mode the turn ends via `finishIfSpoken()` (`streamDone && pendingSpeech == 0`),
+  never via `pump()`. A sentence that fails is retried once with the model reloaded, then reported through
+  `onError` → `reportSpeechFailure` → `ttsNotice` (shown on the Speaking screen) and skipped; a "successful"
+  synthesis that yields zero audio counts as a failure. Failures must never be silent.
 - **Construct a fresh `HermesClient(baseUrl, apiKey)` per request** from
   `JarvisSettings`; never cache it. It is the only place that builds `/v1` URLs,
   sets `Authorization`/`X-Hermes-Session-Id`, or parses OpenAI chunk JSON.
@@ -209,6 +216,11 @@ screens add `BackHandler { screen = Chat }`.
   playback is the fix, since we know when we're playing.
 - **`onScore` state is unsynchronized** and only safe because the `scores`
   collector runs on `uiScope` (Main). Don't move the collector off the main thread.
+- **The wake listener is a foreground service, not tied to the activity.** Only `wakeBackground` decides whether
+  it outlives the screen. On Android 14+ a microphone foreground service can't be started from a boot receiver, so
+  `BootReceiver` can fail (it logs `could not start the wake listener at boot`) and the listener then only comes
+  back the next time the app is opened. The "WAKE WORD ACTIVE" tag on the voice screen shows only when
+  `LocalBranding.wakePhrase != null`, i.e. `wakeEnabled`. Not verified on a device.
 - **Wake word is owned by whoever holds the mic.** `pauseEngine()` before
   recognition (frees the mic), resume only when leaving the conversation.
   `goIdle()` deliberately does NOT re-arm wake inside a conversation — doing so
@@ -248,20 +260,45 @@ screens add `BackHandler { screen = Chat }`.
   native jars). x86/x86_64 native libs are excluded in `packaging.jniLibs` because the AAR's
   x86 `libonnxruntime.so` collides — the app is ARM-only anyway.
 - **Local models are downloaded at runtime, never bundled** (the APK is already ~150 MB).
-  STT models (`LocalSttStore`, `filesDir/models/<id>/`) are individual files from a *pinned*
-  Hugging Face revision, each with a SHA-256; the biggest (Parakeet, encoder 652 MB) is
-  ~660 MB. TTS voices (`LocalTtsStore`, `filesDir/tts/<id>/content/`) are one `.tar.bz2` from
+  STT models (`LocalSttStore`, `filesDir/models/<id>/`) are either individual files from a *pinned*
+  Hugging Face revision, each with a SHA-256, or one `.tar.bz2` from the sherpa-onnx `asr-models` release
+  (`LocalSttModel.archive`, pinned to GitHub's asset digest, unpacked with the shared `ModelStore.unpack`;
+  the unpacked files are size-checked). TTS voices (`LocalTtsStore`, `filesDir/tts/<id>/content/`) are one `.tar.bz2` from
   the sherpa-onnx `tts-models` release (pinned to GitHub's own asset `digest`), unpacked with
   commons-compress behind a path-traversal guard; a `.complete` marker is written last.
   Add a model = one catalog entry (verify the file layout and hashes first; several
   `csukuangfj/...` HF repos are empty — those models only exist as release tarballs).
-  Model ids double as folder names and are persisted in settings: don't rename them.
-- **Hermes ignores a bare `model`.** On `/v1/chat/completions` the Hermes api_server only honours
-  the request's `model` if the request also carries a `provider`, or the server has
-  `gateway.platforms.api_server.direct_model_requests: true` (see Hermes docs, "Per-request model
-  selection"). So the Settings "Provider (optional)" field is sent alongside `model`
-  (`ChatRequest.provider`, omitted when blank — `HermesClient`'s Json has `explicitNulls = false`).
-  `/v1/models` only advertises the profile name, so it can't be used to list selectable models.
+  Model ids double as folder names and are persisted in settings: don't rename them. `LocalTtsStore` deletes
+  `filesDir/tts/<id>` folders whose id left the catalog (STT doesn't), so dropping a voice also frees its space.
+  The user asked that existing models are **not removed** when better ones arrive: add, don't replace.
+- **Catalog entries carry `year`, `score`, `desktopRtf`; Settings shows them as `meta`** ("2026 · WER 5.9% · 0.07×
+  real time on a desktop", built by `modelMeta`). `year` is when that *build* was published (release asset date),
+  `desktopRtf` is measured (below), and `score` is only a published number I could source: Open ASR Leaderboard
+  average WER (Moonshine tiny v1 12.7, Parakeet v3 6.3, Parakeet Unified 5.9, Whisper turbo 7.8) and MOS
+  (Kokoro 4.44, Supertonic 3 4.32). Blank = no source found. Don't invent one. Both lists are kept sorted by
+  `desktopRtf`, fastest first.
+- **STT catalog, ordered by measured speed.** Desktop sherpa-onnx 1.13.8, 4 threads, RTF on a 15 s clip (8 s for
+  Moonshine 2026): Zipformer small 0.020, Moonshine tiny 2026 0.029, Parakeet 110M 0.034 (default), Moonshine tiny
+  v1 0.037, Moonshine base 2026 0.044, Moonshine base v1 0.051, Parakeet 0.6B v2/v3/Unified 0.064/0.066/0.069,
+  Whisper tiny.en 0.090, base.en 0.178, small.en 0.496, turbo 0.642. Zipformer small prints ALL CAPS, so
+  `uppercaseOutput` → `SttAudio.sentenceCase`. Parakeet 0.6B needs ~1.2 GB RAM and a 650 MB download.
+  **Moonshine v2 (`.ort`, merged decoder, `Family.MoonshineV2`) fails silently on audio of 10 s or more**: ONNX
+  Runtime errors inside the quantized decoder and sherpa returns an empty string. `maxSegmentSeconds = 7` makes
+  `SttAudio.split` cut long speech at the quietest 20 ms in the last 40% of each piece (unit-checked: cuts land in
+  pauses, no samples lost). Never assume an empty transcript means silence for that family.
+- **How Hermes actually picks a model** (source + docs, "Per-request model selection"). Precedence: a session
+  `/model` override, then a model persisted on the session, then a `model_routes` alias, then the request's
+  `model`/`provider`, then Hermes's own default. So a model already set on a Hermes-side conversation beats the
+  app's setting. On `/v1/chat/completions` a bare `model` is honoured only if it is a route alias, or the request
+  also carries a `provider`, or the server has `gateway.platforms.api_server.direct_model_requests: true`;
+  `hermes-agent` (the virtual name) means "Hermes's default". The Settings "Provider (optional)" field is sent
+  with `model` (`ChatRequest.provider`, omitted when blank — `explicitNulls = false`). `DEFAULT_MODEL` is now
+  `hermes-agent` (it used to be one person's `mimo-v2.5-pro-ultraspeed`); stored models are left alone.
+  **The Model field is a picker**: `GET /v1/models` lists only `hermes-agent` plus route aliases (with `root` = the
+  model each resolves to), while `GET /api/model/options` (same bearer key, served by the api_server) returns the
+  real catalog `{providers:[{slug,name,authenticated,models,featured_models,total_models}], model, provider}`.
+  Picking a provider model sets Model **and** Provider together, which is what makes Hermes honour it; providers
+  with `authenticated=false` are not offered. Both fetches fail quietly (older Hermes) and the field stays free text.
 - **Tool activity is shown, reasoning is not available.** Hermes' `/v1/chat/completions` stream carries
   only content deltas plus a custom SSE event `hermes.tool.progress` (`{tool, emoji, label, toolCallId,
   status: running|completed}`; `_`-prefixed internal tools are filtered server-side; a `completed` without a
@@ -272,8 +309,23 @@ screens add `BackHandler { screen = Chat }`.
   Text that arrives after a tool starts becomes a new assistant message after it (`assistantIndex` /
   `replyIndex` reset to -1), which is why chat creates its reply on the first delta instead of an empty
   placeholder up front. The voice screen additionally keeps a live `tools` list (`ui/ToolActivity.kt`,
-  cleared per turn) for its on-screen display. There is no reasoning/thinking stream on that endpoint, so
-  there is nothing to render for it.
+  cleared per turn) for its on-screen display.
+- **Reasoning is not streamed by Hermes, but it is stored; it is fetched after the turn.** The chat stream has
+  no reasoning. `/api/sessions/{id}/chat/stream` and `/v1/runs` events carry a `reasoning.available` event, but
+  that is only the visible text of each model step (`_relay_thinking`: cut to 500 chars, and it fires for the
+  final answer too), i.e. mostly a copy of the reply, so it is deliberately not used. The model's real
+  reasoning is stored per message: `GET /api/sessions/{id}/messages` returns `reasoning`, `reasoning_content`
+  and `tool_calls`. `TurnEnricher.addDetails` reads that after each turn and inserts a
+  `UiMessage.ROLE_REASONING` entry (and stored tool calls if none arrived live) at the START of the turn (index
+  `turnStart`, right after the user message), guarded so it does nothing if anything else touched the
+  conversation meanwhile. Settings has a switch (`showReasoning`). Reasoning appears when the turn ends, not
+  live; if the model returns none, or this Hermes lacks the route, nothing is added. `historyForRequest()`
+  excludes `tool` and `reasoning` entries (`UiMessage.isAnnotation`). `hermes/TurnDetails.kt` is the tolerant
+  parser (the API is undocumented: every field is a `JsonElement`).
+- **Replies never start with a blank line.** Hermes opens replies with newlines; `ConversationRepository.streamReply`
+  creates the reply on its first visible text and both view models use it. Saved conversations are trimmed on load.
+- **Hermes approval requests are not integrated.** Approvals exist only on `/v1/runs` (`approval.request` event,
+  resolved with `POST /v1/runs/{id}/approval`); the app talks to `/v1/chat/completions`, which exposes neither.
 - **Voice turns send a `system` message.** `JarvisSettings.voiceInstructions` (toggle + editable text,
   default `SettingsStore.DEFAULT_VOICE_PROMPT`) is passed as `streamChat(systemPrompt = …)` from
   `ConversationViewModel` only — text chat is unaffected. Hermes layers a request `system` message on top of
@@ -288,19 +340,24 @@ screens add `BackHandler { screen = Chat }`.
   it after 5 idle minutes; switching models frees the old one first. All native access is under
   one lock because releasing during a decode crashes. They also record load/decode timings,
   which Settings shows so models can be compared on the real device.
-- **`LocalTts` streams into an `AudioTrack`** and must `play()` before writing — a blocking write
-  to a stopped `MODE_STREAM` track never returns. `stop()` does `pause()+flush()+release()` so a
-  writer blocked on a full buffer is released. It pre-buffers ~0.6 s so a slow voice doesn't stutter.
+- **`LocalTts` streams into one `AudioTrack` shared by all queued sentences** and must `play()` before
+  writing — a blocking write to a stopped `MODE_STREAM` track never returns. `stop()` bumps `generation`,
+  swaps in a fresh `Out` (so a stale worker can't touch the next run's state) and does
+  `pause()+flush()+release()` so a writer blocked on a full buffer is released. It pre-buffers ~0.6 s only when
+  the track starts. Per-sentence `onStart`/`onDone` come from a main-thread poll of `playbackHeadPosition`
+  against each sentence's frame range (with a deadline so a stalled track can't hang the turn).
 - **espeak-ng is GPL-3.0 and is statically inside `libsherpa-onnx-jni.so`** (the Piper/Kokoro/Kitten
   voices need it; the voice archives also ship its `espeak-ng-data`). Distributing this APK
   (e.g. in `dist/`) therefore has GPL implications for an otherwise Apache-2.0 project — sort
   that out before publishing a build. Supertonic's archive ships no `espeak-ng-data` and its model is
   OpenRAIL-M (code MIT); the library is statically linked regardless, so the GPL note stands.
-- **TTS catalog is the int8 builds, ordered by measured speed.** Real-time factor with desktop sherpa-onnx
-  1.13.8, 4 threads, one sentence: Supertonic 0.05, Piper low 0.14, Kitten v0.8 0.27, Piper medium 0.33,
-  Kokoro int8 1.3 (slower than real time, even on a desktop). The bigger fp32/fp16 builds of the same voices
-  were dropped; `LocalTtsStore` deletes `filesDir/tts/<id>` folders whose id left the catalog, so removing an
-  entry also frees its space. Supertonic calls the stream callback once with the whole utterance, so
+- **TTS catalog, ordered by measured speed.** Real-time factor with desktop sherpa-onnx 1.13.8, 4 threads, one
+  sentence: Supertonic 0.05, Inflect nano v2 0.06 (22 MB, VITS + espeak), Piper Lessac low 0.15, Piper Ryan low
+  0.16, Supertonic 3 0.18, Piper Lessac medium 0.20 (default), Piper LibriTTS-R medium 0.21, Kitten nano 0.29,
+  Kitten micro 0.33, Kokoro int8 1.3. Left out as too slow: Piper high (1.4), Kitten mini (0.58); Pocket TTS needs
+  a reference voice. Inflect nano v1 was reviewed as robotic (MOS 3.48); v2 has no review I found. The four
+  original tiny voices spoke 21 awkward inputs (numbers, URLs, emoji, Danish, punctuation only) without an exception or empty audio on
+  desktop, so a phone-side crash is likelier memory or threading than input text. Supertonic calls the stream callback once with the whole utterance, so
   `LocalTtsEngine.generate` also plays the returned audio if no chunk ever arrived.
 - **`ConversationViewModel.settings` is cached**, but `ensureReady` re-reads it at the start of
   each conversation (when `recognizer` is null, since `stopAll` drops it), and rebuilds the TTS
@@ -310,8 +367,16 @@ screens add `BackHandler { screen = Chat }`.
   `flushPendingSentence` (idle flush) only speaks a buffered sentence if it already
   ends with `.!?`.
 - **`SettingsStore` silently migrates the model**: empty OR the legacy value
-  `"kimi-for-coding"` is rewritten to `DEFAULT_MODEL = "mimo-v2.5-pro-ultraspeed"`
-  on read; a deliberately-set custom model is preserved.
+  `"kimi-for-coding"` is rewritten to `DEFAULT_MODEL = "hermes-agent"` on read; a deliberately-set custom
+  model is preserved.
+- **Opened over the lock screen = voice only, and Hermes is told.** `MainActivity.locked`
+  (`KeyguardManager.isKeyguardLocked`, refreshed on resume, new intent, unlock and screen-off) forces the
+  Conversation screen: no chat history, History list or Settings (API key), and closing it `finish()`es instead of
+  opening the chat. `ConversationViewModel` starts a fresh conversation on the first turn of a locked visit
+  (`freshConversation`; the earlier one is persisted first) so nothing from earlier chats is shown or sent, and
+  appends `LOCKED_PROMPT` to the system message every turn while locked: answer and read, but ask the user to
+  unlock before anything that changes, sends, deletes, spends or controls. That is an instruction, not a lock:
+  Hermes runs tools server-side and nothing in the app can stop an action it decides to take. A `LOCKED` tag shows.
 - **`ConversationScreen` calls `vm.stopAll()` in both `ON_STOP` and `onDispose`**,
   and `vm.resetView()` in `LaunchedEffect(Unit)` (the VM is retained but the shared
   repo conversation may have been replaced — resetView avoids showing a stale

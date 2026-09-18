@@ -227,3 +227,9 @@ abstract class ModelStore<M : Any> {
         const val REPORT_EVERY_BYTES = 512L * 1024
     }
 }
+
+/** The picker's fact line for a model, e.g. "2026 · WER 5.9% · 0.07× real time on a desktop". [score] may be blank. */
+fun modelMeta(year: Int, score: String, desktopRtf: Double): String =
+    listOf(year.toString(), score, "%.2f× real time on a desktop".format(java.util.Locale.US, desktopRtf))
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
