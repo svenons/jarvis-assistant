@@ -146,10 +146,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Close out the current reply (finished or cut off) and save the conversation. */
     private fun endReply() {
-        if (assistantIndex >= 0) {
-            assistantIndex = -1
-            repo.persistAsync()
-        }
+        assistantIndex = -1
+        repo.persistAsync() // a no-op when nothing changed since the last save
     }
 
     /** Start a fresh turn: invalidate in-flight callbacks and clear pipeline state. */
@@ -262,8 +260,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
             override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
                 if (turn != myTurn) return@onMain
-                tools.applyToolEvent(id, tool, emoji, label, running)
-                if (running) stalled.value = true // a tool is running: say WORKING now, not after the stall timer
+                tools.applyToolEvent(id, tool, emoji, label, running) // the live on-screen list
+                if (running) {
+                    // Also keep the step in the saved conversation. Text after a tool becomes a new reply
+                    // after it, so history reads in the order things happened.
+                    if (repo.addToolMessage(id, toolLine(emoji, tool, label)) >= 0) assistantIndex = -1
+                    stalled.value = true // a tool is running: say WORKING now, not after the stall timer
+                } else {
+                    repo.finishTool(id)
+                }
             }
 
             override fun onSessionId(id: String) { repo.setSessionId(id) }

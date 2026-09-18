@@ -75,6 +75,23 @@ class ConversationRepository private constructor(private val store: Conversation
         return messages.lastIndex
     }
 
+    /**
+     * A tool the agent started. Kept in the conversation (and saved) so history shows what it did.
+     * Returns the new message's index, or -1 if this step was already recorded.
+     */
+    fun addToolMessage(id: String, text: String): Int {
+        if (messages.any { it.toolId == id }) return -1
+        messages.add(UiMessage(UiMessage.ROLE_TOOL, text, toolId = id))
+        markChanged()
+        return messages.lastIndex
+    }
+
+    /** The tool finished (only affects how it's drawn while live, so nothing to save). */
+    fun finishTool(id: String) {
+        val i = messages.indexOfLast { it.toolId == id }
+        if (i >= 0 && !messages[i].toolDone) messages[i] = messages[i].copy(toolDone = true)
+    }
+
     fun appendToMessage(index: Int, delta: String) {
         if (index in messages.indices) {
             val cur = messages[index]
@@ -90,9 +107,9 @@ class ConversationRepository private constructor(private val store: Conversation
         }
     }
 
-    /** History (non-error) as Hermes chat messages for building a request. */
+    /** History as Hermes chat messages for building a request: no errors, and no tool steps (not chat turns). */
     fun historyForRequest(): List<ChatMessage> =
-        messages.filter { !it.isError }.map { ChatMessage(it.role, it.text) }
+        messages.filter { !it.isError && it.role != UiMessage.ROLE_TOOL }.map { ChatMessage(it.role, it.text) }
 
     suspend fun persist() = saveLock.withLock {
         val v = version.get()

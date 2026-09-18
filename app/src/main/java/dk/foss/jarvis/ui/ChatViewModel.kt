@@ -25,14 +25,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val messages get() = repo.messages
     val isStreaming = mutableStateOf(false)
     val notConfigured = mutableStateOf(false)
-    /** Tools the agent ran for the latest message; kept after the reply so you can see what it did. */
-    val tools = androidx.compose.runtime.mutableStateListOf<ToolStep>()
 
     private var currentSource: EventSource? = null
 
+    // Index of the reply being streamed, or -1 until its first word (and again after a tool step, so the
+    // text that follows a tool becomes a new reply after it). Replies are created as they arrive, not as an
+    // empty placeholder up front, so tool steps land between your message and the answer in order.
+    private var replyIndex = -1
+
     fun newConversation() {
         cancel()
-        tools.clear()
         viewModelScope.launch {
             repo.persist()
             repo.startNew()
@@ -43,6 +45,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         currentSource?.cancel()
         currentSource = null
         isStreaming.value = false
+        repo.persistAsync() // keep whatever streamed before the stop
     }
 
     fun dismissNotConfigured() { notConfigured.value = false }
@@ -55,20 +58,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val s = settingsStore.settings.first()
             if (!s.isConfigured) { notConfigured.value = true; return@launch }
 
-            tools.clear()
+            replyIndex = -1
             repo.addMessage("user", text)
+            repo.persistAsync() // saved now, not when the reply finishes
             val history = repo.historyForRequest()
-            val assistantIndex = repo.addMessage("assistant", "")
             isStreaming.value = true
 
             val client = HermesClient(s.baseUrl, s.apiKey)
             currentSource = client.streamChat(history, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
                 override fun onDelta(textDelta: String) = onMain {
-                    repo.appendToMessage(assistantIndex, textDelta)
+                    if (replyIndex < 0) replyIndex = repo.addMessage("assistant", textDelta)
+                    else repo.appendToMessage(replyIndex, textDelta)
                 }
 
                 override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
-                    tools.applyToolEvent(id, tool, emoji, label, running)
+                    if (running) {
+                        if (repo.addToolMessage(id, toolLine(emoji, tool, label)) >= 0) replyIndex = -1
+                    } else {
+                        repo.finishTool(id)
+                    }
                 }
 
                 override fun onSessionId(id: String) { repo.setSessionId(id) }
@@ -76,19 +84,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 override fun onComplete() = onMain {
                     isStreaming.value = false
                     currentSource = null
-                    viewModelScope.launch { repo.persist() }
+                    repo.persistAsync()
                 }
 
                 override fun onError(message: String) = onMain {
-                    val cur = messages.getOrNull(assistantIndex)
-                    if (cur != null && cur.text.isEmpty()) {
-                        repo.replaceMessage(assistantIndex, "⚠️ $message", isError = true)
-                    } else {
-                        repo.addMessage("assistant", "⚠️ $message", isError = true)
-                    }
+                    repo.addMessage("assistant", "⚠️ $message", isError = true)
                     isStreaming.value = false
                     currentSource = null
-                    viewModelScope.launch { repo.persist() }
+                    repo.persistAsync()
                 }
             })
         }

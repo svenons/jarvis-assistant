@@ -66,11 +66,12 @@ fun ChatScreen(
     val messages = vm.messages
     val streaming by vm.isStreaming
     val name = LocalBranding.current.name
-    val tools = vm.tools
+    // Between your message (or a tool step) and the next words, show the assistant "typing".
+    val showTyping = streaming && messages.lastOrNull()?.role.let { it != "assistant" }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text, tools.size) {
-        // The tool list is one extra row after the last message.
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex + if (tools.isEmpty()) 0 else 1)
+    LaunchedEffect(messages.size, messages.lastOrNull()?.text, showTyping) {
+        val last = messages.size - 1 + if (showTyping) 1 else 0 // the typing bubble is one extra row
+        if (last >= 0) listState.animateScrollToItem(last)
     }
 
     DeepSpaceBackground(active = false) {
@@ -142,10 +143,18 @@ fun ChatScreen(
                         contentPadding = PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        items(messages) { msg -> MessageBubble(msg) }
-                        if (tools.isNotEmpty()) {
-                            item { ToolActivity(tools, Modifier.padding(horizontal = 6.dp)) }
+                        items(messages) { msg ->
+                            if (msg.role == UiMessage.ROLE_TOOL) {
+                                ToolLine(
+                                    text = msg.text,
+                                    running = msg.toolId != null && !msg.toolDone,
+                                    done = msg.toolId != null && msg.toolDone,
+                                )
+                            } else {
+                                MessageBubble(msg)
+                            }
                         }
+                        if (showTyping) item { MessageBubble(UiMessage("assistant", "")) }
                     }
                 }
 

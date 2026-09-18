@@ -265,9 +265,15 @@ screens add `BackHandler { screen = Chat }`.
 - **Tool activity is shown, reasoning is not available.** Hermes' `/v1/chat/completions` stream carries
   only content deltas plus a custom SSE event `hermes.tool.progress` (`{tool, emoji, label, toolCallId,
   status: running|completed}`; `_`-prefixed internal tools are filtered server-side; a `completed` without a
-  prior `running` is dropped). `HermesClient` maps it to `StreamCallbacks.onToolProgress`; the VMs keep a
-  `tools` list (`ui/ToolActivity.kt`) that is display-only — never spoken, never persisted, cleared per turn.
-  There is no reasoning/thinking stream on that endpoint, so there is nothing to render for it.
+  prior `running` is dropped). `HermesClient` maps it to `StreamCallbacks.onToolProgress`. Tool steps are never spoken,
+  but each one is also a conversation message with role `tool` (`UiMessage.ROLE_TOOL`, text from `toolLine()`),
+  added by `ConversationRepository.addToolMessage` and saved like any other, so history shows what the agent
+  did. `historyForRequest()` excludes them (they aren't chat turns) and History's message count skips them.
+  Text that arrives after a tool starts becomes a new assistant message after it (`assistantIndex` /
+  `replyIndex` reset to -1), which is why chat creates its reply on the first delta instead of an empty
+  placeholder up front. The voice screen additionally keeps a live `tools` list (`ui/ToolActivity.kt`,
+  cleared per turn) for its on-screen display. There is no reasoning/thinking stream on that endpoint, so
+  there is nothing to render for it.
 - **Voice turns send a `system` message.** `JarvisSettings.voiceInstructions` (toggle + editable text,
   default `SettingsStore.DEFAULT_VOICE_PROMPT`) is passed as `streamChat(systemPrompt = …)` from
   `ConversationViewModel` only — text chat is unaffected. Hermes layers a request `system` message on top of

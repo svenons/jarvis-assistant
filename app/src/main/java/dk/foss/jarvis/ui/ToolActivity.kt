@@ -13,8 +13,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** One tool the Hermes agent ran during a turn — shown on screen only, never spoken or saved. */
+/** One tool the Hermes agent ran during a turn, for the live list on screen (never spoken). It is also saved to the conversation as a tool message. */
 data class ToolStep(val id: String, val emoji: String, val label: String, val done: Boolean)
+
+/** The one-line text of a tool step, as stored in the conversation. */
+fun toolLine(emoji: String, tool: String, label: String) = "${emoji.ifBlank { "\u2699" }} ${label.ifBlank { tool }}"
 
 /** Apply a `hermes.tool.progress` event: a start adds a running row, a finish ticks it off. */
 fun MutableList<ToolStep>.applyToolEvent(id: String, tool: String, emoji: String, label: String, running: Boolean) {
@@ -56,5 +59,22 @@ fun ToolActivity(steps: List<ToolStep>, modifier: Modifier = Modifier, maxRows: 
                 }
             }
         }
+    }
+}
+
+/** A tool step in the chat transcript: a quiet line, blue while running, grey once done or when loaded from history. */
+@Composable
+fun ToolLine(text: String, running: Boolean, done: Boolean, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text,
+            fontFamily = DmSans,
+            fontSize = 13.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            color = if (running) JarvisColors.ThinkBlue else JarvisColors.Muted,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (done) Text("✓", fontSize = 12.sp, color = JarvisColors.Muted, modifier = Modifier.padding(start = 8.dp))
     }
 }

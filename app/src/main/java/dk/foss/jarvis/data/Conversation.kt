@@ -2,8 +2,20 @@ package dk.foss.jarvis.data
 
 import kotlinx.serialization.Serializable
 
-/** A single message shown in the UI (also the in-memory unit shared by chat + voice). */
-data class UiMessage(val role: String, val text: String, val isError: Boolean = false)
+/**
+ * A single message shown in the UI (also the in-memory unit shared by chat + voice). A tool step the
+ * agent ran is a message with role [ROLE_TOOL]: it is saved and shown in history but never sent to Hermes.
+ * [toolId] is set only while the step is live in this session, to match its completion event.
+ */
+data class UiMessage(
+    val role: String,
+    val text: String,
+    val isError: Boolean = false,
+    val toolId: String? = null,
+    val toolDone: Boolean = false,
+) {
+    companion object { const val ROLE_TOOL = "tool" }
+}
 
 @Serializable
 data class StoredMessage(val role: String, val text: String)
@@ -24,5 +36,6 @@ data class ConversationMeta(
     val id: String,
     val title: String,
     val updatedAt: Long,
+    /** Real messages only; tool steps are not counted. */
     val messageCount: Int,
 )
