@@ -993,8 +993,8 @@ private fun WakePhraseCard(
                 error?.let { Text(it, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.ErrorOrange) }
                 Text(
                     "A wake phrase can't be typed in: each one is a small model trained for it. Train one " +
-                        "for any phrase (free, about an hour — see openwakeword.com/train), then import the " +
-                        ".onnx file here.",
+                        "with openWakeWord's training notebook (github.com/dscripka/openWakeWord; needs Linux " +
+                        "or Google Colab), then import the .onnx file here.",
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
