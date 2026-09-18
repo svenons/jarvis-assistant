@@ -69,6 +69,7 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val hint by vm.hint
     val working by vm.working
     val stalled by vm.stalled
+    val tools = vm.tools
 
     val segments = vm.segments
     val speakingIndex by vm.speakingIndex
@@ -168,6 +169,7 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
                     ConvState.Thinking -> ThinkingContent(
                         transcript = transcript,
                         stalled = stalled,
+                        tools = tools,
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -178,6 +180,7 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
                         speakingIndex = speakingIndex,
                         pendingText = pendingText,
                         listState = listState,
+                        tools = tools,
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -370,7 +373,7 @@ private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
 }
 
 @Composable
-private fun ThinkingContent(transcript: String, stalled: Boolean, onMicTap: () -> Unit) {
+private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit) {
     // Blinking dots
     val transition = rememberInfiniteTransition(label = "blink")
     val dot1 by transition.animateFloat(
@@ -443,6 +446,11 @@ private fun ThinkingContent(transcript: String, stalled: Boolean, onMicTap: () -
                     Box(Modifier.size(6.dp).alpha(dot3).background(JarvisColors.ThinkBlue, CircleShape))
                 }
             }
+
+            if (tools.isNotEmpty()) {
+                Spacer(Modifier.height(24.dp))
+                ToolActivity(tools, Modifier.fillMaxWidth().padding(horizontal = 24.dp))
+            }
         }
 
         MicFab(
@@ -460,6 +468,7 @@ private fun SpeakingContent(
     speakingIndex: Int,
     pendingText: String,
     listState: androidx.compose.foundation.lazy.LazyListState,
+    tools: List<ToolStep>,
     onMicTap: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
@@ -479,6 +488,11 @@ private fun SpeakingContent(
             Spacer(Modifier.height(8.dp))
 
             StatusTag("SPEAKING", JarvisColors.Cyan)
+
+            if (tools.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                ToolActivity(tools, Modifier.fillMaxWidth().padding(horizontal = 8.dp), maxRows = 3)
+            }
 
             Spacer(Modifier.height(16.dp))
 

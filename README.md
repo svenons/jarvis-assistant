@@ -17,6 +17,8 @@ sidecar — point it at your Hermes URL + API key and go.
 - 🎙️ **Voice conversation mode** — speak, Jarvis thinks and replies aloud, then listens again.
 - 🗣️ **"Hey Jarvis" wake word** — fully on-device ([openWakeWord](https://github.com/dscripka/openWakeWord)), no cloud, no account.
 - 🤖 **Default digital assistant** — launch with the long-press / assist gesture, replacing Gemini.
+- 🛠️ **See what the agent is doing** — the tools Hermes runs (its `hermes.tool.progress` events) are listed on screen in chat and voice mode, never read aloud.
+- 🤏 **Speakable answers** — voice turns carry a short system instruction so Hermes says the result ("lights are off in the kitchen and hallway"), not the process. On by default; editable under *Spoken replies*.
 - 🔊 **Pluggable voice** — your phone's built-in TTS by default; optional **ElevenLabs** for premium speech.
 - 🔒 App-only: your Hermes key stays on your device; works over LAN, Tailscale, or a reverse proxy.
 
@@ -44,6 +46,8 @@ Or copy the APK to the phone and tap it (allow "install from unknown sources").
 6. **ElevenLabs** (optional) — paste an ElevenLabs API key + voice ID for premium speech; otherwise the phone's built-in voice is used.
 7. **On-device speech recognition** (optional, needed on GrapheneOS) — under *On-device speech recognition*, **Download** one or more models (Moonshine, Whisper or Parakeet; from ~125 MB to ~660 MB, resumable), pick one, and switch on **Use on-device recognition**. Speech is then transcribed on the phone — no network, no Google speech service — and it never falls back to a cloud STT. After a few conversations each model row shows its measured speed on your phone, so you can compare.
 8. **On-device voice** (optional, needed on GrapheneOS) — under *On-device voice*, **Download** a voice (Kitten, Piper or Kokoro; ~27–320 MB), tap **Play sample** to hear and time it, pick one, and switch on **Use on-device voice**. Replies are then spoken by the phone itself, with no network and no system text-to-speech engine.
+
+9. **Spoken replies** — on by default. Voice turns send an instruction asking Hermes for short, plain answers. Edit the wording (or switch it off) under *Spoken replies*. It only applies to voice; text chat gets full answers.
 
 Tap the 🎤 in the chat top bar (or use the assist gesture / wake word) to enter
 voice conversation.

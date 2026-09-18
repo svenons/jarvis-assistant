@@ -101,6 +101,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf(SettingsStore.DEFAULT_MODEL) }
     var provider by remember { mutableStateOf("") }
+    var voiceBrief by remember { mutableStateOf(true) }
+    var voicePrompt by remember { mutableStateOf("") }
     var elevenKey by remember { mutableStateOf("") }
     var elevenVoice by remember { mutableStateOf(SettingsStore.DEFAULT_ELEVEN_VOICE) }
     fun isBatteryExempt(): Boolean {
@@ -161,6 +163,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     suspend fun persist() {
         store.updateConnection(baseUrl, apiKey, model, provider)
         store.updateVoice(elevenKey, elevenVoice)
+        store.updateVoicePrompt(voicePrompt)
     }
 
     fun enableWake() {
@@ -201,6 +204,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         apiKey = s.apiKey
         model = s.model
         provider = s.provider
+        voiceBrief = s.voiceBrief
+        voicePrompt = s.voicePrompt
         elevenKey = s.elevenKey
         elevenVoice = s.elevenVoiceId
         wakeEnabled = s.wakeEnabled
@@ -372,6 +377,58 @@ fun SettingsScreen(onBack: () -> Unit) {
                             it.startsWith("Testing") -> JarvisColors.TextSecondary
                             else -> JarvisColors.ErrorOrange
                         },
+                    )
+                }
+
+                SettingsDivider()
+                SectionHeader("Spoken replies")
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Short, speakable answers",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "In voice conversations, ask Hermes to say the result, not the process — " +
+                                "\u201Clights are off in the kitchen and hallway\u201D. Text chat is unaffected.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = voiceBrief,
+                        onCheckedChange = {
+                            voiceBrief = it
+                            scope.launch { store.updateVoiceBrief(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+                if (voiceBrief) {
+                    OutlinedTextField(
+                        value = voicePrompt,
+                        onValueChange = { voicePrompt = it },
+                        label = { Text("Instruction sent with each voice message") },
+                        placeholder = { Text(SettingsStore.DEFAULT_VOICE_PROMPT, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = textFieldColors,
+                    )
+                    Text(
+                        "Leave blank for the built-in wording. Sent as a system message on every voice turn, " +
+                            "so Hermes follows it without you installing anything on the server.",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Muted,
                     )
                 }
 

@@ -27,6 +27,8 @@ class HermesClient(
     interface StreamCallbacks {
         fun onDelta(textDelta: String)
         fun onSessionId(id: String) {}
+        /** A tool the agent is running started ([running]) or finished. [label] is empty on finish. */
+        fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) {}
         fun onComplete() {}
         fun onError(message: String) {}
     }
@@ -37,10 +39,15 @@ class HermesClient(
         provider: String?,
         sessionId: String?,
         cb: StreamCallbacks,
+        systemPrompt: String? = null,
     ): EventSource {
+        // Hermes layers a `system` message on top of its own prompt for this request only
+        // (it isn't stored in the session), so it's re-sent every turn.
+        val outgoing = if (systemPrompt.isNullOrBlank()) messages
+        else listOf(ChatMessage("system", systemPrompt)) + messages
         val body = json.encodeToString(
             ChatRequest.serializer(),
-            ChatRequest(model = model, messages = messages, stream = true, provider = provider?.ifBlank { null }),
+            ChatRequest(model = model, messages = outgoing, stream = true, provider = provider?.ifBlank { null }),
         )
         val builder = Request.Builder()
             .url("$baseUrl/v1/chat/completions")
@@ -61,6 +68,14 @@ class HermesClient(
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 if (data.isBlank() || data == "[DONE]") {
                     if (data == "[DONE]" && finished.compareAndSet(false, true)) cb.onComplete()
+                    return
+                }
+                if (type == TOOL_PROGRESS_EVENT) {
+                    runCatching { json.decodeFromString(ToolProgress.serializer(), data) }.getOrNull()?.let {
+                        if (it.toolCallId.isNotEmpty()) {
+                            cb.onToolProgress(it.toolCallId, it.tool, it.emoji, it.label, running = it.status != "completed")
+                        }
+                    }
                     return
                 }
                 try {
@@ -112,5 +127,6 @@ class HermesClient(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        const val TOOL_PROGRESS_EVENT = "hermes.tool.progress"
     }
 }

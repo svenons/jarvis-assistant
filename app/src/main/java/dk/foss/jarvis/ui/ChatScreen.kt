@@ -65,9 +65,11 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     val messages = vm.messages
     val streaming by vm.isStreaming
+    val tools = vm.tools
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(messages.size, messages.lastOrNull()?.text, tools.size) {
+        // The tool list is one extra row after the last message.
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex + if (tools.isEmpty()) 0 else 1)
     }
 
     DeepSpaceBackground(active = false) {
@@ -140,6 +142,9 @@ fun ChatScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(messages) { msg -> MessageBubble(msg) }
+                        if (tools.isNotEmpty()) {
+                            item { ToolActivity(tools, Modifier.padding(horizontal = 6.dp)) }
+                        }
                     }
                 }
 

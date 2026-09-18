@@ -206,6 +206,18 @@ screens add `BackHandler { screen = Chat }`.
   selection"). So the Settings "Provider (optional)" field is sent alongside `model`
   (`ChatRequest.provider`, omitted when blank — `HermesClient`'s Json has `explicitNulls = false`).
   `/v1/models` only advertises the profile name, so it can't be used to list selectable models.
+- **Tool activity is shown, reasoning is not available.** Hermes' `/v1/chat/completions` stream carries
+  only content deltas plus a custom SSE event `hermes.tool.progress` (`{tool, emoji, label, toolCallId,
+  status: running|completed}`; `_`-prefixed internal tools are filtered server-side; a `completed` without a
+  prior `running` is dropped). `HermesClient` maps it to `StreamCallbacks.onToolProgress`; the VMs keep a
+  `tools` list (`ui/ToolActivity.kt`) that is display-only — never spoken, never persisted, cleared per turn.
+  There is no reasoning/thinking stream on that endpoint, so there is nothing to render for it.
+- **Voice turns send a `system` message.** `JarvisSettings.voiceInstructions` (toggle + editable text,
+  default `SettingsStore.DEFAULT_VOICE_PROMPT`) is passed as `streamChat(systemPrompt = …)` from
+  `ConversationViewModel` only — text chat is unaffected. Hermes layers a request `system` message on top of
+  its own prompt (ephemeral, not stored in the session), so it must be re-sent every turn. This is used
+  instead of a Hermes *skill* on purpose: skills load on demand (`/skill-name`), so they can't be forced
+  onto every voice turn.
 - **TTS voice install is slow, not stuck.** Voices are `.tar.bz2` and bzip2 is decoded in pure Java
   (CPU-bound: ~5 s per 67 MB on a fast desktop, several times that on a phone, more in a debug
   build; Kokoro is 320 MB). `ModelState.Installing` carries progress for that reason — keep the

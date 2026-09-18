@@ -25,11 +25,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val messages get() = repo.messages
     val isStreaming = mutableStateOf(false)
     val notConfigured = mutableStateOf(false)
+    /** Tools the agent ran for the latest message; kept after the reply so you can see what it did. */
+    val tools = androidx.compose.runtime.mutableStateListOf<ToolStep>()
 
     private var currentSource: EventSource? = null
 
     fun newConversation() {
         cancel()
+        tools.clear()
         viewModelScope.launch {
             repo.persist()
             repo.startNew()
@@ -52,6 +55,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val s = settingsStore.settings.first()
             if (!s.isConfigured) { notConfigured.value = true; return@launch }
 
+            tools.clear()
             repo.addMessage("user", text)
             val history = repo.historyForRequest()
             val assistantIndex = repo.addMessage("assistant", "")
@@ -61,6 +65,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             currentSource = client.streamChat(history, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
                 override fun onDelta(textDelta: String) = onMain {
                     repo.appendToMessage(assistantIndex, textDelta)
+                }
+
+                override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
+                    tools.applyToolEvent(id, tool, emoji, label, running)
                 }
 
                 override fun onSessionId(id: String) { repo.setSessionId(id) }

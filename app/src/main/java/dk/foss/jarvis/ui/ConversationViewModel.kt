@@ -42,6 +42,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val hint = mutableStateOf<String?>(null)
     val working = mutableStateOf(false) // Hermes stream still open (response not complete)
     val stalled = mutableStateOf(false) // content paused mid-stream — likely running a tool
+    /** Tools the agent ran this turn (from `hermes.tool.progress`) — display only, never spoken. */
+    val tools = androidx.compose.runtime.mutableStateListOf<ToolStep>()
 
     // --- follow-along reply display state ---
     val segments = androidx.compose.runtime.mutableStateListOf<String>()
@@ -145,6 +147,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         main.removeCallbacks(stallIndicator)
         working.value = false
         stalled.value = false
+        tools.clear()
         // Stop any in-flight recognition so the next start isn't blocked by
         // AudioCapture's "if (active) return" guard (which silently drops it).
         runCatching { recognizer?.stop() }
@@ -182,6 +185,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         hint.value = null
         working.value = false
         stalled.value = false
+        tools.clear()
         segments.clear()
         speakingIndex.value = -1
         pendingText.value = ""
@@ -240,6 +244,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 if (turn == myTurn) onTextDelta(textDelta)
             }
 
+            override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
+                if (turn != myTurn) return@onMain
+                tools.applyToolEvent(id, tool, emoji, label, running)
+                if (running) stalled.value = true // a tool is running: say WORKING now, not after the stall timer
+            }
+
             override fun onSessionId(id: String) { repo.setSessionId(id) }
 
             override fun onComplete() = onMain {
@@ -267,7 +277,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 error.value = message
                 goIdle()
             }
-        })
+        }, systemPrompt = s.voiceInstructions)
     }
 
     /** A token arrived: show it, and speak as soon as a full sentence is available. */
@@ -404,6 +414,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         main.removeCallbacks(rearmWake)
         working.value = false
         stalled.value = false
+        tools.clear()
         recognizer?.release()
         recognizer = null
         runCatching { tts?.stop(); androidFallback?.stop() }

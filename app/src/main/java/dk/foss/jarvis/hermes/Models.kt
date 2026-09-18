@@ -28,6 +28,19 @@ data class StreamChoice(
 @Serializable
 data class Delta(val role: String? = null, val content: String? = null)
 
+/**
+ * Payload of Hermes' custom `hermes.tool.progress` SSE event: one tool starting
+ * (`status = "running"`, with a display [label]) or finishing (`"completed"`, id only).
+ */
+@Serializable
+data class ToolProgress(
+    val tool: String = "",
+    val emoji: String = "",
+    val label: String = "",
+    val toolCallId: String = "",
+    val status: String = "",
+)
+
 // --- /v1/models (connection test) ---
 
 @Serializable

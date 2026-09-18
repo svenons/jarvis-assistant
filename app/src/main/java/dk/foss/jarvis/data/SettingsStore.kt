@@ -31,9 +31,17 @@ data class JarvisSettings(
     val useLocalTts: Boolean = false,
     /** Which [LocalTtsModel] to speak with (its `id`). */
     val localTtsModel: String = LocalTtsModel.DEFAULT_ID,
+    /** In voice conversations, ask Hermes for short, speakable replies. */
+    val voiceBrief: Boolean = true,
+    /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
+    val voicePrompt: String = "",
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotEmpty() && apiKey.isNotEmpty()
     val useElevenLabs: Boolean get() = elevenKey.isNotEmpty() && elevenVoiceId.isNotEmpty()
+
+    /** System message for voice turns, or null when the user turned the brief style off. */
+    val voiceInstructions: String? get() =
+        if (voiceBrief) voicePrompt.ifBlank { SettingsStore.DEFAULT_VOICE_PROMPT } else null
 }
 
 class SettingsStore(private val context: Context) {
@@ -50,6 +58,8 @@ class SettingsStore(private val context: Context) {
         val LOCAL_STT_MODEL = stringPreferencesKey("local_stt_model")
         val LOCAL_TTS = booleanPreferencesKey("local_tts")
         val LOCAL_TTS_MODEL = stringPreferencesKey("local_tts_model")
+        val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
+        val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
     }
 
     val settings: Flow<JarvisSettings> = context.dataStore.data.map { p ->
@@ -69,6 +79,8 @@ class SettingsStore(private val context: Context) {
             localSttModel = LocalSttModel.byId(p[Keys.LOCAL_STT_MODEL] ?: "").id,
             useLocalTts = p[Keys.LOCAL_TTS] ?: false,
             localTtsModel = LocalTtsModel.byId(p[Keys.LOCAL_TTS_MODEL] ?: "").id,
+            voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
+            voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
         )
     }
 
@@ -92,6 +104,14 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.LOCAL_TTS_MODEL] = id }
     }
 
+    suspend fun updateVoiceBrief(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.VOICE_BRIEF] = enabled }
+    }
+
+    suspend fun updateVoicePrompt(prompt: String) {
+        context.dataStore.edit { p -> p[Keys.VOICE_PROMPT] = prompt.trim() }
+    }
+
     suspend fun updateConnection(baseUrl: String, apiKey: String, model: String, provider: String) {
         context.dataStore.edit { p ->
             p[Keys.BASE_URL] = baseUrl.trim().trimEnd('/')
@@ -112,5 +132,15 @@ class SettingsStore(private val context: Context) {
         const val DEFAULT_MODEL = "mimo-v2.5-pro-ultraspeed"
         const val LEGACY_MODEL = "kimi-for-coding" // prior default; migrated to DEFAULT_MODEL
         const val DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"
+
+        /** Sent as a `system` message on voice turns so replies are short enough to listen to. */
+        const val DEFAULT_VOICE_PROMPT =
+            "Your reply will be read aloud by a text-to-speech voice, so answer the way a person " +
+                "would say it. Lead with the outcome in one or two short sentences. Report what " +
+                "happened, not how: for \"turn off all the lights\" say which rooms went dark, " +
+                "not which tools or steps you used. Skip preambles, recaps, and offers of further " +
+                "help. Only mention a failure, or something that needs my decision. Use plain " +
+                "spoken sentences: no markdown, lists, tables, code, emoji, URLs, or file paths. " +
+                "Give the long version only if I ask for details."
     }
 }
