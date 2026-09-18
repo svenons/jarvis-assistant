@@ -12,6 +12,7 @@ import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -30,7 +31,7 @@ import java.io.InputStream
 /**
  * An on-device voice, shipped as one `.tar.bz2` on the sherpa-onnx `tts-models` release. The
  * archive's SHA-256 is pinned (GitHub's own asset digest), and it's unpacked after it verifies.
- * Every family needs the `espeak-ng-data` folder that comes inside the archive.
+ * Every family except Supertonic needs the `espeak-ng-data` folder that comes inside the archive.
  */
 class LocalTtsModel(
     val id: String,
@@ -41,54 +42,78 @@ class LocalTtsModel(
     archiveName: String,
     val archiveBytes: Long,
     val archiveSha256: String,
-    /** Main model file inside the archive. */
+    /** Main model file inside the archive (also what marks an install as complete). */
     val model: String,
     /** Speaker-embeddings file (Kokoro, Kitten); null for single-voice Piper models. */
     val voices: String? = null,
 ) {
     /** Decides which sherpa-onnx model config [LocalTtsEngine] builds. */
-    enum class Family { Vits, Kokoro, Kitten }
+    enum class Family { Vits, Kokoro, Kitten, Supertonic }
 
     val archiveUrl: String = "$RELEASE_URL/$archiveName"
 
     companion object {
         /** Persisted in settings; also the folder name, so it must stay stable across versions. */
-        const val DEFAULT_ID = "piper-en_US-lessac-medium"
+        const val DEFAULT_ID = "piper-en_US-lessac-medium-int8"
 
         private const val RELEASE_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
 
-        /** Ordered small → large, so the picker reads as a speed ladder. */
+        /**
+         * Ordered fastest → slowest by the real-time factor measured with the desktop sherpa-onnx 1.13.8 on
+         * one sentence (4 threads): Supertonic 0.05, Piper low 0.14, Kitten 0.27, Piper medium 0.33,
+         * Kokoro 1.3. A phone is slower in absolute terms; Settings shows the real numbers per voice.
+         */
         val all: List<LocalTtsModel> = listOf(
             LocalTtsModel(
-                id = "kitten-nano-en-v0_2-fp16",
-                label = "Kitten nano v0.2 (English)",
-                blurb = "Tiny voice model. Try this first if you want the lowest latency.",
+                id = "supertonic-en-int8",
+                label = "Supertonic (English)",
+                blurb = "Built for speed: the quickest of these in testing.",
+                family = Family.Supertonic,
+                archiveName = "sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2",
+                archiveBytes = 84_692_981,
+                archiveSha256 = "8c74359f63edd5045d47747f65331f0f6dbcbc91d7e898dd756d631295fe3259",
+                model = "vector_estimator.int8.onnx",
+            ),
+            LocalTtsModel(
+                id = "piper-en_US-lessac-low-int8",
+                label = "Piper Lessac low (US English)",
+                blurb = "Small and quick; lower audio quality (16 kHz).",
+                family = Family.Vits,
+                archiveName = "vits-piper-en_US-lessac-low-int8.tar.bz2",
+                archiveBytes = 21_070_568,
+                archiveSha256 = "af63fbe60d8bdcfccdee61ba057304a11dfc077145da383d4d351ec3c594d5e2",
+                model = "en_US-lessac-low.onnx",
+            ),
+            LocalTtsModel(
+                id = "kitten-nano-en-v0_8-int8",
+                label = "Kitten nano v0.8 (English)",
+                blurb = "Tiny model.",
                 family = Family.Kitten,
-                archiveName = "kitten-nano-en-v0_2-fp16.tar.bz2",
-                archiveBytes = 26_586_708,
-                archiveSha256 = "0345a8a2f4a710cb8f7912c9a731ded8b3e1e69b33a871efa95c2e64651518fe",
-                model = "model.fp16.onnx",
+                archiveName = "kitten-nano-en-v0_8-int8.tar.bz2",
+                archiveBytes = 31_220_690,
+                archiveSha256 = "6fa5be852612ce761094ba74ee6123b4fc4acfefa79bf64dc63acae4a83af2fd",
+                model = "model.int8.onnx",
                 voices = "voices.bin",
             ),
             LocalTtsModel(
                 id = DEFAULT_ID,
                 label = "Piper Lessac medium (US English)",
-                blurb = "Piper voice: clear and light. A good default.",
+                blurb = "Clear and light.",
                 family = Family.Vits,
-                archiveName = "vits-piper-en_US-lessac-medium.tar.bz2",
-                archiveBytes = 67_230_653,
-                archiveSha256 = "9e3febfacf0abf4270172d2958bcec246032b7e88efc2720840cc80c93de334e",
+                archiveName = "vits-piper-en_US-lessac-medium-int8.tar.bz2",
+                archiveBytes = 20_969_179,
+                archiveSha256 = "f1c6d0295cf16087b05f80fdca5b44daca5cd78e2c425d419a42ba34929805f9",
                 model = "en_US-lessac-medium.onnx",
             ),
             LocalTtsModel(
-                id = "kokoro-en-v0_19",
+                id = "kokoro-int8-en-v0_19",
                 label = "Kokoro v0.19 (English)",
-                blurb = "Most natural-sounding of these, and the largest and heaviest.",
+                blurb = "Highest quality of these, but heavy: may not keep up in real time on a phone.",
                 family = Family.Kokoro,
-                archiveName = "kokoro-en-v0_19.tar.bz2",
-                archiveBytes = 319_625_534,
-                archiveSha256 = "912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7",
-                model = "model.onnx",
+                archiveName = "kokoro-int8-en-v0_19.tar.bz2",
+                archiveBytes = 103_248_205,
+                archiveSha256 = "c9f0dd393615805b0bab050c340834d5e684e732aec91c0e860cd30e982c08bd",
+                model = "model.int8.onnx",
                 voices = "voices.bin",
             ),
         )
@@ -104,7 +129,13 @@ class LocalTtsStore private constructor(context: Context) : ModelStore<LocalTtsM
 
     private val root = File(context.filesDir, "tts")
 
-    init { initStates(models) }
+    init {
+        // Voices that left the catalog (bigger, slower builds of the same models) would otherwise
+        // sit on disk forever with no way to delete them from Settings.
+        val known = models.map { it.id }.toSet()
+        root.listFiles()?.forEach { if (it.isDirectory && it.name !in known) it.deleteRecursively() }
+        initStates(models)
+    }
 
     fun model(id: String): LocalTtsModel = LocalTtsModel.byId(id)
 
@@ -234,10 +265,16 @@ internal object LocalTtsEngine {
             var firstAudioMs = 0L
             var samples = 0L
             var stopped = false
-            engine.generateWithCallback(text, 0, 1.0f) { chunk ->
+            val audio = engine.generateWithCallback(text, 0, 1.0f) { chunk ->
                 if (samples == 0L) firstAudioMs = SystemClock.elapsedRealtime() - start
                 samples += chunk.size
                 if (onChunk(chunk, rate)) 1 else { stopped = true; 0 }
+            }
+            // A model that never streams still returns its audio: play that rather than stay silent.
+            if (samples == 0L && !stopped && audio.samples.isNotEmpty()) {
+                firstAudioMs = SystemClock.elapsedRealtime() - start
+                samples = audio.samples.size.toLong()
+                if (!onChunk(audio.samples, rate)) stopped = true
             }
             if (!stopped) {
                 val genMs = SystemClock.elapsedRealtime() - start
@@ -283,7 +320,7 @@ internal object LocalTtsEngine {
         val dir = store.content(model)
         fun path(name: String) = File(dir, name).path
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-        val espeak = path("espeak-ng-data")
+        val espeak = path("espeak-ng-data") // not used by Supertonic
         val modelConfig = when (model.family) {
             LocalTtsModel.Family.Vits -> OfflineTtsModelConfig(
                 vits = OfflineTtsVitsModelConfig(model = path(model.model), tokens = path("tokens.txt"), dataDir = espeak),
@@ -304,6 +341,18 @@ internal object LocalTtsEngine {
                     voices = path(requireNotNull(model.voices)),
                     tokens = path("tokens.txt"),
                     dataDir = espeak,
+                ),
+                numThreads = threads,
+            )
+            LocalTtsModel.Family.Supertonic -> OfflineTtsModelConfig(
+                supertonic = OfflineTtsSupertonicModelConfig(
+                    durationPredictor = path("duration_predictor.int8.onnx"),
+                    textEncoder = path("text_encoder.int8.onnx"),
+                    vectorEstimator = path(model.model),
+                    vocoder = path("vocoder.int8.onnx"),
+                    ttsJson = path("tts.json"),
+                    unicodeIndexer = path("unicode_indexer.bin"),
+                    voiceStyle = path("voice.bin"),
                 ),
                 numThreads = threads,
             )

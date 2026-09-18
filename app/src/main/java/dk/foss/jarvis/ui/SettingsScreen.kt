@@ -14,7 +14,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -39,13 +41,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -86,6 +85,14 @@ import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
@@ -122,6 +129,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     val ttsTimings by LocalTtsEngine.timings.collectAsState()
     var ttsModelId by remember { mutableStateOf(LocalTtsModel.DEFAULT_ID) }
     var samplePlayer by remember { mutableStateOf<LocalTts?>(null) }
+    var sttExpanded by remember { mutableStateOf(false) }
+    var ttsExpanded by remember { mutableStateOf(false) }
     var sampleError by remember { mutableStateOf<String?>(null) }
     var overlayGranted by remember { mutableStateOf(AndroidSettings.canDrawOverlays(context)) }
     var batteryExempt by remember { mutableStateOf(isBatteryExempt()) }
@@ -594,157 +603,96 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 SettingsDivider()
-                SectionHeader("On-device speech recognition")
+                SectionHeader("On-device speech")
                 Text(
-                    "Transcribes your voice on the phone — no network and no Google speech service, " +
-                        "so it works on GrapheneOS. Download one or more models, pick one, and compare " +
-                        "the measured speed on your phone.",
-                    fontFamily = DmSans,
-                    fontSize = 13.sp,
-                    color = JarvisColors.Muted,
-                )
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Use on-device recognition",
-                            fontFamily = DmSans,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 15.sp,
-                            color = JarvisColors.TextPrimary,
-                        )
-                        Text(
-                            "Overrides ElevenLabs Scribe and never falls back to a cloud service.",
-                            fontFamily = DmSans,
-                            fontSize = 12.sp,
-                            color = JarvisColors.Muted,
-                        )
-                    }
-                    Switch(
-                        checked = localStt,
-                        onCheckedChange = {
-                            localStt = it
-                            scope.launch { store.updateLocalStt(it) }
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = JarvisColors.Cyan,
-                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
-                            uncheckedThumbColor = JarvisColors.Muted,
-                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
-                        ),
-                    )
-                }
-                sttStore.models.forEach { m ->
-                    ModelRow(
-                        label = m.label,
-                        blurb = m.blurb,
-                        sizeMb = m.totalBytes / 1_000_000,
-                        state = sttStates[m.id] ?: ModelState.Missing,
-                        selected = m.id == sttModelId,
-                        detail = sttTimings[m.id]?.let { sttDetail(it) },
-                        onSelect = {
-                            sttModelId = m.id
-                            scope.launch { store.updateLocalSttModel(m.id) }
-                        },
-                        onDownload = { sttStore.download(m) },
-                        onCancel = { sttStore.cancel(m) },
-                        onDelete = { sttStore.delete(m) },
-                    )
-                }
-                if (localStt && sttStates[sttModelId] !is ModelState.Ready) {
-                    Text(
-                        "The selected model isn’t downloaded yet — voice input will report an error until it is.",
-                        fontFamily = DmSans,
-                        fontSize = 13.sp,
-                        color = JarvisColors.ErrorOrange,
-                    )
-                }
-                Text(
-                    "Speed is measured on your phone from real conversations: “x real time” below 1.00 " +
-                        "means it transcribes faster than you speak. A model change applies from the next conversation.",
+                    "Runs on the phone — no network and no Google speech service, so it works on " +
+                        "GrapheneOS. Speed is measured on this phone from real use: below 1.00× real " +
+                        "time is faster than real time. A change applies from the next conversation.",
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
                 )
-
-                SettingsDivider()
-                SectionHeader("On-device voice")
-                Text(
-                    "Speaks replies with a voice model on the phone — no network and no system " +
-                        "text-to-speech engine, so it works on GrapheneOS. Download one or more voices, " +
-                        "pick one, and use Play sample to hear and time each.",
-                    fontFamily = DmSans,
-                    fontSize = 13.sp,
-                    color = JarvisColors.Muted,
-                )
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Use on-device voice",
-                            fontFamily = DmSans,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 15.sp,
-                            color = JarvisColors.TextPrimary,
-                        )
-                        Text(
-                            "Overrides ElevenLabs and the system voice for replies.",
-                            fontFamily = DmSans,
-                            fontSize = 12.sp,
-                            color = JarvisColors.Muted,
+                ModelPicker(
+                    title = "Listening",
+                    hint = "Replaces ElevenLabs Scribe; never falls back to a cloud service.",
+                    enabled = localStt,
+                    onEnabled = {
+                        localStt = it
+                        scope.launch { store.updateLocalStt(it) }
+                    },
+                    selectedLabel = sttStore.model(sttModelId).label,
+                    state = sttStates[sttModelId] ?: ModelState.Missing,
+                    sizeMb = sttStore.model(sttModelId).totalBytes / 1_000_000,
+                    detail = sttTimings[sttModelId]?.let { sttDetail(it) },
+                    missingHint = "voice input will fail until it's downloaded",
+                    expanded = sttExpanded,
+                    onToggle = { sttExpanded = !sttExpanded },
+                ) {
+                    sttStore.models.forEach { m ->
+                        ModelRow(
+                            label = m.label,
+                            blurb = m.blurb,
+                            sizeMb = m.totalBytes / 1_000_000,
+                            state = sttStates[m.id] ?: ModelState.Missing,
+                            selected = m.id == sttModelId,
+                            detail = sttTimings[m.id]?.let { sttDetail(it) },
+                            onSelect = {
+                                sttModelId = m.id
+                                scope.launch { store.updateLocalSttModel(m.id) }
+                            },
+                            onDownload = { sttStore.download(m) },
+                            onCancel = { sttStore.cancel(m) },
+                            onDelete = { sttStore.delete(m) },
                         )
                     }
-                    Switch(
-                        checked = localTts,
-                        onCheckedChange = {
-                            localTts = it
-                            scope.launch { store.updateLocalTts(it) }
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = JarvisColors.Cyan,
-                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
-                            uncheckedThumbColor = JarvisColors.Muted,
-                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
-                        ),
-                    )
                 }
-                ttsStore.models.forEach { m ->
-                    ModelRow(
-                        label = m.label,
-                        blurb = m.blurb,
-                        sizeMb = m.archiveBytes / 1_000_000,
-                        state = ttsStates[m.id] ?: ModelState.Missing,
-                        selected = m.id == ttsModelId,
-                        detail = ttsTimings[m.id]?.let { ttsDetail(it) },
-                        onSelect = {
-                            ttsModelId = m.id
-                            scope.launch { store.updateLocalTtsModel(m.id) }
-                        },
-                        onDownload = { ttsStore.download(m) },
-                        onCancel = { ttsStore.cancel(m) },
-                        onDelete = { ttsStore.delete(m) },
-                        onSample = {
-                            sampleError = null
-                            samplePlayer?.shutdown()
-                            val player = LocalTts(context, m.id)
-                            samplePlayer = player
-                            player.speak(
-                                SAMPLE_TEXT,
-                                onDone = { player.shutdown() },
-                                onError = { sampleError = it; player.shutdown() },
-                            )
-                        },
-                    )
+                ModelPicker(
+                    title = "Speaking",
+                    hint = "Replaces ElevenLabs and the system voice for replies.",
+                    enabled = localTts,
+                    onEnabled = {
+                        localTts = it
+                        scope.launch { store.updateLocalTts(it) }
+                    },
+                    selectedLabel = ttsStore.model(ttsModelId).label,
+                    state = ttsStates[ttsModelId] ?: ModelState.Missing,
+                    sizeMb = ttsStore.model(ttsModelId).archiveBytes / 1_000_000,
+                    detail = ttsTimings[ttsModelId]?.let { ttsDetail(it) },
+                    missingHint = "replies fall back to the system voice, which GrapheneOS may not have",
+                    expanded = ttsExpanded,
+                    onToggle = { ttsExpanded = !ttsExpanded },
+                ) {
+                    ttsStore.models.forEach { m ->
+                        ModelRow(
+                            label = m.label,
+                            blurb = m.blurb,
+                            sizeMb = m.archiveBytes / 1_000_000,
+                            state = ttsStates[m.id] ?: ModelState.Missing,
+                            selected = m.id == ttsModelId,
+                            detail = ttsTimings[m.id]?.let { ttsDetail(it) },
+                            onSelect = {
+                                ttsModelId = m.id
+                                scope.launch { store.updateLocalTtsModel(m.id) }
+                            },
+                            onDownload = { ttsStore.download(m) },
+                            onCancel = { ttsStore.cancel(m) },
+                            onDelete = { ttsStore.delete(m) },
+                            onSample = {
+                                sampleError = null
+                                samplePlayer?.shutdown()
+                                val player = LocalTts(context, m.id)
+                                samplePlayer = player
+                                player.speak(
+                                    SAMPLE_TEXT,
+                                    onDone = { player.shutdown() },
+                                    onError = { sampleError = it; player.shutdown() },
+                                )
+                            },
+                        )
+                    }
                 }
                 sampleError?.let {
                     Text(it, fontFamily = DmSans, fontSize = 13.sp, color = JarvisColors.ErrorOrange)
-                }
-                if (localTts && ttsStates[ttsModelId] !is ModelState.Ready) {
-                    Text(
-                        "The selected voice isn’t downloaded yet — replies fall back to the system voice, " +
-                            "which GrapheneOS may not have.",
-                        fontFamily = DmSans,
-                        fontSize = 13.sp,
-                        color = JarvisColors.ErrorOrange,
-                    )
                 }
 
                 SettingsDivider()
@@ -836,6 +784,94 @@ private fun NeutralButton(text: String, onClick: () -> Unit) {
     }
 }
 
+/**
+ * One on-device feature (listening or speaking): its on/off switch and a one-line summary of the
+ * chosen model. The full model list only takes space when [expanded].
+ */
+@Composable
+private fun ModelPicker(
+    title: String,
+    hint: String,
+    enabled: Boolean,
+    onEnabled: (Boolean) -> Unit,
+    selectedLabel: String,
+    state: ModelState,
+    sizeMb: Long,
+    detail: String?,
+    /** Finishes "Not downloaded — …" when the feature is on but its model isn't there. */
+    missingHint: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    models: @Composable ColumnScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .border(1.dp, JarvisColors.CyanBorder, shape),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 10.dp, top = 8.dp),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    fontFamily = DmSans,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 15.sp,
+                    color = JarvisColors.TextPrimary,
+                )
+                Text(hint, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted)
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = onEnabled,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = JarvisColors.Cyan,
+                    checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                    uncheckedThumbColor = JarvisColors.Muted,
+                    uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                ),
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(selectedLabel, fontFamily = DmSans, fontSize = 14.sp, color = JarvisColors.CyanText)
+                val (status, color) = when (state) {
+                    is ModelState.Ready -> "Ready · $sizeMb MB${detail?.let { " · $it" } ?: ""}" to JarvisColors.TextSecondary
+                    is ModelState.Downloading -> "Downloading… ${percent(state.doneBytes, state.totalBytes)}%" to JarvisColors.TextPrimary
+                    is ModelState.Installing -> "Unpacking… ${percent(state.doneBytes, state.totalBytes)}%" to JarvisColors.TextPrimary
+                    is ModelState.Failed -> state.message to JarvisColors.ErrorOrange
+                    is ModelState.Missing ->
+                        if (enabled) "Not downloaded — $missingHint" to JarvisColors.ErrorOrange
+                        else "Not downloaded · $sizeMb MB" to JarvisColors.Muted
+                }
+                Text(status, fontFamily = DmSans, fontSize = 12.sp, color = color)
+            }
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "Hide models" else "Choose model",
+                tint = JarvisColors.Cyan,
+            )
+        }
+        if (expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                content = models,
+            )
+        }
+    }
+}
+
+private fun percent(done: Long, total: Long): Int = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
+
+/** A model in the expanded list: tap to select; small icon buttons to download, play a sample, cancel, delete. */
 @Composable
 private fun ModelRow(
     label: String,
@@ -851,122 +887,85 @@ private fun ModelRow(
     onDelete: () -> Unit,
     onSample: (() -> Unit)? = null,
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(10.dp)
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .border(1.dp, if (selected) JarvisColors.Cyan.copy(alpha = 0.6f) else JarvisColors.CyanBorder, shape)
+            .background(if (selected) JarvisColors.Cyan.copy(alpha = 0.08f) else Color.Transparent)
             .clickable(onClick = onSelect)
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(
-                selected = selected,
-                onClick = onSelect,
-                colors = RadioButtonDefaults.colors(
-                    selectedColor = JarvisColors.Cyan,
-                    unselectedColor = JarvisColors.Muted,
-                ),
-            )
-            Column(Modifier.weight(1f)) {
-                Text(
-                    label,
-                    fontFamily = DmSans,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 15.sp,
-                    color = JarvisColors.TextPrimary,
-                )
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                if (selected) {
+                    Icon(Icons.Default.Check, contentDescription = "Selected", tint = JarvisColors.Cyan, modifier = Modifier.size(18.dp))
+                }
+            }
+            Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                Text(label, fontFamily = DmSans, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = JarvisColors.TextPrimary)
                 Text(blurb, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Muted)
+                val (status, color) = when (state) {
+                    is ModelState.Ready -> "Ready · $sizeMb MB${detail?.let { " · $it" } ?: ""}" to JarvisColors.CyanText
+                    is ModelState.Downloading ->
+                        "Downloading… ${state.doneBytes / 1_000_000} / ${state.totalBytes / 1_000_000} MB" to JarvisColors.TextPrimary
+                    is ModelState.Installing ->
+                        "Unpacking… ${percent(state.doneBytes, state.totalBytes)}% · one-time step" to JarvisColors.TextPrimary
+                    is ModelState.Failed -> state.message to JarvisColors.ErrorOrange
+                    is ModelState.Missing -> "$sizeMb MB · not downloaded" to JarvisColors.Muted
+                }
+                Text(status, fontFamily = DmSans, fontSize = 12.sp, color = color)
+            }
+            when (state) {
+                is ModelState.Ready -> {
+                    if (onSample != null) RowAction(Icons.Default.PlayArrow, "Play sample", JarvisColors.Cyan, onSample)
+                    RowAction(Icons.Default.Delete, "Delete", JarvisColors.Muted, onDelete)
+                }
+                is ModelState.Downloading, is ModelState.Installing -> RowAction(Icons.Default.Close, "Cancel", JarvisColors.Muted, onCancel)
+                is ModelState.Failed, is ModelState.Missing -> RowAction(Icons.Default.Download, "Download", JarvisColors.Cyan, onDownload)
             }
         }
         when (state) {
-            is ModelState.Ready -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Ready · $sizeMb MB",
-                        fontFamily = DmSans,
-                        fontSize = 12.sp,
-                        color = JarvisColors.CyanText,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (onSample != null) {
-                        TextButton(onClick = onSample) { Text("Play sample", fontFamily = DmSans, color = JarvisColors.Cyan) }
-                    }
-                    TextButton(onClick = onDelete) { Text("Delete", fontFamily = DmSans, color = JarvisColors.Muted) }
-                }
-                detail?.let { Text(it, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextPrimary) }
-            }
-            is ModelState.Downloading -> {
-                Text(
-                    "Downloading… ${state.doneBytes / 1_000_000} / ${state.totalBytes / 1_000_000} MB",
-                    fontFamily = DmSans,
-                    fontSize = 12.sp,
-                    color = JarvisColors.TextPrimary,
-                )
-                LinearProgressIndicator(
-                    progress = { state.doneBytes.toFloat() / state.totalBytes },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = JarvisColors.Cyan,
-                    trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
-                )
-                TextButton(onClick = onCancel) { Text("Cancel", fontFamily = DmSans, color = JarvisColors.Muted) }
-            }
-            is ModelState.Installing -> {
-                val pct = if (state.totalBytes > 0) (state.doneBytes * 100 / state.totalBytes).toInt() else 0
-                Text(
-                    "Unpacking… $pct% \u00B7 one-time step, bigger voices take a few minutes",
-                    fontFamily = DmSans,
-                    fontSize = 12.sp,
-                    color = JarvisColors.TextPrimary,
-                )
-                LinearProgressIndicator(
-                    progress = { state.doneBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = JarvisColors.Cyan,
-                    trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
-                )
-                TextButton(onClick = onCancel) { Text("Cancel", fontFamily = DmSans, color = JarvisColors.Muted) }
-            }
-            is ModelState.Failed -> {
-                Text(state.message, fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.ErrorOrange)
-                TextButton(onClick = onDownload) { Text("Retry download", fontFamily = DmSans, color = JarvisColors.Cyan) }
-            }
-            is ModelState.Missing -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "$sizeMb MB · not downloaded",
-                        fontFamily = DmSans,
-                        fontSize = 12.sp,
-                        color = JarvisColors.Muted,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = onDownload) { Text("Download", fontFamily = DmSans, color = JarvisColors.Cyan) }
-                }
-            }
+            is ModelState.Downloading -> LinearProgressIndicator(
+                progress = { state.doneBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                color = JarvisColors.Cyan,
+                trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
+            )
+            is ModelState.Installing -> LinearProgressIndicator(
+                progress = { state.doneBytes.toFloat() / state.totalBytes.coerceAtLeast(1) },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                color = JarvisColors.Cyan,
+                trackColor = JarvisColors.Cyan.copy(alpha = 0.15f),
+            )
+            else -> {}
         }
     }
 }
 
+/** A 40 dp icon button — tighter than IconButton's 48 dp minimum, so a row stays short. */
+@Composable
+private fun RowAction(icon: ImageVector, description: String, tint: Color, onClick: () -> Unit) {
+    Icon(
+        icon,
+        contentDescription = description,
+        tint = tint,
+        modifier = Modifier.clip(CircleShape).clickable(onClick = onClick).padding(10.dp).size(20.dp),
+    )
+}
+
 private const val SAMPLE_TEXT = "Hello, I'm Jarvis. This is how I sound with this voice."
 
-/** "Last: 4.2 s of speech in 0.9 s (0.21× real time) · load 2.1 s" — below 1.00× is faster than real time. */
+/** "0.21× real time · load 2.1 s" — below 1.00× is faster than real time. */
 private fun sttDetail(t: LocalSttEngine.Timing): String? = listOfNotNull(
-    if (t.audioMs > 0) {
-        "Last: %.1f s of speech in %.1f s (%.2f× real time)"
-            .format(t.audioMs / 1000.0, t.decodeMs / 1000.0, t.decodeMs.toDouble() / t.audioMs)
-    } else null,
+    if (t.audioMs > 0) "%.2f× real time".format(t.decodeMs.toDouble() / t.audioMs) else null,
     if (t.loadMs > 0) "load %.1f s".format(t.loadMs / 1000.0) else null,
 ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
 
 /** Same idea for a voice, plus how long until the first sound. */
 private fun ttsDetail(t: LocalTtsEngine.Timing): String? = listOfNotNull(
-    if (t.audioMs > 0) {
-        "Last: %.1f s of speech in %.1f s (%.2f× real time)"
-            .format(t.audioMs / 1000.0, t.genMs / 1000.0, t.genMs.toDouble() / t.audioMs)
-    } else null,
-    if (t.firstAudioMs > 0) "first sound after %.1f s".format(t.firstAudioMs / 1000.0) else null,
+    if (t.audioMs > 0) "%.2f× real time".format(t.genMs.toDouble() / t.audioMs) else null,
+    if (t.firstAudioMs > 0) "first sound %.1f s".format(t.firstAudioMs / 1000.0) else null,
     if (t.loadMs > 0) "load %.1f s".format(t.loadMs / 1000.0) else null,
 ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
 

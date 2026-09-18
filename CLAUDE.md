@@ -74,7 +74,7 @@ mechanism behind an interface.
 | Shared HTTP | `net/Http.kt` | `Http.base` (bounded timeouts) + `Http.streaming` (`readTimeout(0)` for SSE, derived from `base`). Reuse these — never build a new `OkHttpClient`. |
 | Persistence | `data/SettingsStore.kt` (DataStore prefs), `data/ConversationStore.kt` (one JSON file per conversation), `data/ConversationRepository.kt` (singleton source of truth) | Settings = DataStore; conversations = `filesDir/conversations/<id>.json`. Don't mix. |
 | STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs), `voice/LocalRecognizer.kt` + `voice/LocalSttModel.kt` (fully on-device, sherpa-onnx; catalog of Moonshine / Whisper / Parakeet models) | Three backends behind one interface. |
-| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium), `voice/LocalTts.kt` (on-device sherpa-onnx voices: Kitten / Piper / Kokoro) | Three backends behind one interface. |
+| TTS | `voice/TtsEngine.kt` (`AndroidTts` free / `ElevenLabsTts` premium), `voice/LocalTts.kt` (on-device sherpa-onnx voices: Supertonic / Piper / Kitten / Kokoro) | Three backends behind one interface. |
 | Model downloads | `voice/ModelStore.kt` | Shared base for `LocalSttStore` / `LocalTtsStore`: resumable, SHA-256-verified downloads + per-model `ModelState`. |
 | Voice loop | `ui/ConversationViewModel.kt` | `ConvState` Idle→Listening→Thinking→Speaking; recognition, streaming, sentence extraction, single-flight TTS pump, turn invalidation, wake re-arm. |
 | Wake word | `wake/WakeWordService.kt`, `wake/BootReceiver.kt` | openWakeWord foreground mic service; launches the app on "Hey Jarvis". |
@@ -220,7 +220,7 @@ screens add `BackHandler { screen = Chat }`.
   onto every voice turn.
 - **TTS voice install is slow, not stuck.** Voices are `.tar.bz2` and bzip2 is decoded in pure Java
   (CPU-bound: ~5 s per 67 MB on a fast desktop, several times that on a phone, more in a debug
-  build; Kokoro is 320 MB). `ModelState.Installing` carries progress for that reason — keep the
+  build; Supertonic is 85 MB, Kokoro int8 103 MB). `ModelState.Installing` carries progress for that reason — keep the
   progress reporting if you touch `unpack`. Input buffering makes no measurable difference.
 - **`LocalSttEngine` / `LocalTtsEngine`** keep one model loaded across conversations and free
   it after 5 idle minutes; switching models frees the old one first. All native access is under
@@ -232,7 +232,14 @@ screens add `BackHandler { screen = Chat }`.
 - **espeak-ng is GPL-3.0 and is statically inside `libsherpa-onnx-jni.so`** (the Piper/Kokoro/Kitten
   voices need it; the voice archives also ship its `espeak-ng-data`). Distributing this APK
   (e.g. in `dist/`) therefore has GPL implications for an otherwise Apache-2.0 project — sort
-  that out before publishing a build.
+  that out before publishing a build. Supertonic's archive ships no `espeak-ng-data` and its model is
+  OpenRAIL-M (code MIT); the library is statically linked regardless, so the GPL note stands.
+- **TTS catalog is the int8 builds, ordered by measured speed.** Real-time factor with desktop sherpa-onnx
+  1.13.8, 4 threads, one sentence: Supertonic 0.05, Piper low 0.14, Kitten v0.8 0.27, Piper medium 0.33,
+  Kokoro int8 1.3 (slower than real time, even on a desktop). The bigger fp32/fp16 builds of the same voices
+  were dropped; `LocalTtsStore` deletes `filesDir/tts/<id>` folders whose id left the catalog, so removing an
+  entry also frees its space. Supertonic calls the stream callback once with the whole utterance, so
+  `LocalTtsEngine.generate` also plays the returned audio if no chunk ever arrived.
 - **`ConversationViewModel.settings` is cached**, but `ensureReady` re-reads it at the start of
   each conversation (when `recognizer` is null, since `stopAll` drops it), and rebuilds the TTS
   engine if the voice choice changed.
