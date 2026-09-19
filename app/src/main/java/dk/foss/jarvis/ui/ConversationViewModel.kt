@@ -161,8 +161,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         claimTurn(fromWake)
         viewModelScope.launch {
             ensureReady()
-            if (settings?.isConfigured != true) {
+            val s = settings
+            if (s == null || !s.isConfigured) {
                 error.value = "Configure Hermes in Settings first."
+                state.value = ConvState.Idle
+                return@launch
+            }
+            // Check reachability before committing to a listen: otherwise being off the right network (e.g. away
+            // from home wifi) only surfaces after the mic recorded and STT transcribed, for nothing.
+            if (!HermesClient(s.baseUrl, s.apiKey).isReachable()) {
+                error.value = "No connection to Hermes. Check your wifi, or set up a VPN/tunnel to reach it from outside your network."
                 state.value = ConvState.Idle
                 return@launch
             }
