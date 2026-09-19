@@ -256,7 +256,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun updateConnection(baseUrl: String, apiKey: String, model: String, provider: String) {
         context.dataStore.edit { p ->
-            p[Keys.BASE_URL] = baseUrl.trim().trimEnd('/')
+            // A bare host ("hermes.example.com", typical for a Cloudflare Tunnel) has no scheme, which OkHttp
+            // rejects with an exception; assume https for it. An explicit http:// or https:// is kept as typed.
+            val url = baseUrl.trim().trimEnd('/')
+            p[Keys.BASE_URL] = if (url.isNotEmpty() && !url.contains("://")) "https://$url" else url
             p[Keys.API_KEY] = apiKey.trim()
             p[Keys.MODEL] = model.trim().ifEmpty { DEFAULT_MODEL }
             p[Keys.PROVIDER] = provider.trim()
