@@ -72,7 +72,10 @@ class MainActivity : ComponentActivity() {
         WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = false
         window.setBackgroundDrawableResource(android.R.color.black)
         if (isAssistIntent(intent)) {
-            assistEpoch++
+            // A rotation (or any recreation) hands us the original wake/assist intent again. Only a real launch
+            // (no saved state) is a trigger; replaying it on rotation would jump to the voice screen and start
+            // listening. The lock-screen flags are per-instance, so they are re-applied either way.
+            if (savedInstanceState == null) assistEpoch++
             showOverLockScreen()
         }
         refreshLocked()
@@ -124,6 +127,7 @@ class MainActivity : ComponentActivity() {
                         ConversationScreen(
                             vm = cvm,
                             assistTrigger = assistEpoch,
+                            onRequestUnlock = { done -> requestUnlock(done) },
                             onExit = { leave() },
                         )
                     }
@@ -160,6 +164,20 @@ class MainActivity : ComponentActivity() {
             assistEpoch++
             showOverLockScreen()
         }
+    }
+
+    /**
+     * Ask the system to unlock the phone (fingerprint, PIN or pattern, whatever the lock screen uses), then report
+     * whether it worked. Used when a locked-phone request needs the phone unlocked; the conversation carries on after.
+     */
+    private fun requestUnlock(done: (Boolean) -> Unit) {
+        val km = getSystemService(KEYGUARD_SERVICE) as? KeyguardManager
+        if (km == null || !km.isKeyguardLocked) { refreshLocked(); done(true); return }
+        km.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+            override fun onDismissSucceeded() { refreshLocked(); done(true) }
+            override fun onDismissCancelled() = done(false)
+            override fun onDismissError() = done(false)
+        })
     }
 
     /** Appear over the lock screen and turn the display on (wake-word / assist launch). */

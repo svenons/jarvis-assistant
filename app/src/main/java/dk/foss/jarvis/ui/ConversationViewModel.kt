@@ -50,6 +50,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val locked = mutableStateOf(false)
     // Opened over the lock screen: the first turn starts a fresh conversation, so nothing from earlier chats is sent.
     private var freshConversation = false
+    /** Set when the screen should show the system unlock prompt (fingerprint / PIN); the screen clears it. */
+    val unlockRequested = mutableStateOf(false)
+    /** True from asking for the unlock until its result comes back; the screen doesn't stop the conversation meanwhile. */
+    var unlockInFlight = false
+        private set
+    // Hermes asks for an unlock by ending its reply with UNLOCK_MARKER; the filter strips it from what is shown/spoken.
+    private var unlockFilter = MarkerFilter(UNLOCK_MARKER)
+    private var unlockNeeded = false
     val working = mutableStateOf(false) // Hermes stream still open (response not complete)
     val stalled = mutableStateOf(false) // content paused mid-stream — likely running a tool
     /** Tools the agent ran this turn (from `hermes.tool.progress`) — display only, never spoken. */
@@ -134,7 +142,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun startListening(fromWake: Boolean = false) {
+    /** Set up a turn that keeps the conversation going and owns the mic (or speaker) until it ends. */
+    private fun claimTurn(fromWake: Boolean) {
         // A conversation auto-continues: after Jarvis speaks it listens again.
         continuous = true
         retriedThisTurn = false
@@ -143,6 +152,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         // any pending re-arm so the wake engine doesn't grab the mic mid-capture.
         main.removeCallbacks(rearmWake)
         WakeWordService.pauseListening()
+    }
+
+    fun startListening(fromWake: Boolean = false) {
+        claimTurn(fromWake)
         viewModelScope.launch {
             ensureReady()
             if (settings?.isConfigured != true) {
@@ -269,6 +282,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         working.value = true
         main.postDelayed(stallIndicator, STALL_MS)
         assistantIndex = -1
+        unlockFilter = MarkerFilter(UNLOCK_MARKER)
+        unlockNeeded = false
         repo.addMessage("user", userText)
         repo.persistAsync() // the utterance is saved now, not when the reply finishes
         val turnStart = repo.messages.size // the turn's entries start right after the utterance
@@ -278,7 +293,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val client = HermesClient(s.baseUrl, s.apiKey)
         source = client.streamChat(requestHistory, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
             override fun onDelta(textDelta: String) = onMain {
-                if (turn == myTurn) onTextDelta(textDelta)
+                if (turn != myTurn) return@onMain
+                val visible = unlockFilter.feed(textDelta)
+                if (unlockFilter.found) unlockNeeded = true
+                if (visible.isNotEmpty()) onTextDelta(visible)
             }
 
             override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
@@ -298,6 +316,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
             override fun onComplete() = onMain {
                 if (turn != myTurn) return@onMain
+                // Text held back as a possible marker start was ordinary text after all.
+                unlockFilter.finish().let { if (it.isNotEmpty()) onTextDelta(it) }
                 main.removeCallbacks(idleFlush)
                 main.removeCallbacks(stallIndicator)
                 working.value = false
@@ -333,11 +353,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private fun isPhoneLocked(): Boolean =
         (getApplication<Application>().getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
 
-    /** The voice-style instruction, plus (when the lock screen is up) the locked-phone instruction. Re-sent every turn. */
+    /**
+     * The voice-style instruction, plus (when the lock screen is up) the locked-phone instruction and how to ask for
+     * an unlock. The wording of the former is a setting; the latter is the app's own protocol, so it is always added.
+     * Re-sent every turn.
+     */
     private fun systemPromptFor(s: JarvisSettings): String? {
         val lockedNow = isPhoneLocked()
         locked.value = lockedNow
-        return listOfNotNull(s.voiceInstructions, LOCKED_PROMPT.takeIf { lockedNow })
+        val lockedText = if (lockedNow) s.lockedInstructions?.let { "$it\n\n$UNLOCK_PROTOCOL" } else null
+        return listOfNotNull(s.voiceInstructions, lockedText)
             .joinToString("\n\n")
             .ifBlank { null }
     }
@@ -481,7 +506,44 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun finishTurn() {
+        // Hermes said the request needs the phone unlocked (and has now finished saying so): ask for it, then
+        // carry on from onUnlockResult. Only meaningful while actually locked.
+        val askUnlock = unlockNeeded && isPhoneLocked()
+        unlockNeeded = false
+        if (askUnlock) { askToUnlock(); return }
         if (continuous) startListening() else goIdle()
+    }
+
+    private fun askToUnlock() {
+        state.value = ConvState.Idle // not goIdle(): nothing should re-arm the wake word behind the unlock prompt
+        hint.value = "Unlock your phone to continue"
+        unlockInFlight = true
+        unlockRequested.value = true
+    }
+
+    /** The system unlock prompt (fingerprint / PIN) finished. On success the request is sent again, now unlocked. */
+    fun onUnlockResult(unlocked: Boolean) {
+        if (!unlockInFlight) return
+        unlockInFlight = false
+        locked.value = isPhoneLocked()
+        if (unlocked) {
+            continueAfterUnlock()
+        } else {
+            // Don't start the mic on our own here: the user may have backed out of the app.
+            hint.value = "Still locked. Tap the mic to keep talking."
+            goIdle()
+        }
+    }
+
+    /** Tell Hermes the phone is unlocked so it carries out what it held back. The conversation carries on after. */
+    private fun continueAfterUnlock() {
+        claimTurn(fromWake = false)
+        viewModelScope.launch {
+            ensureReady()
+            beginTurn()
+            transcript.value = UNLOCKED_FOLLOW_UP
+            think(UNLOCKED_FOLLOW_UP)
+        }
     }
 
     /**
@@ -520,6 +582,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopAll() {
         continuous = false
+        unlockInFlight = false // a late unlock result belongs to a screen that is gone
+        unlockRequested.value = false
+        unlockNeeded = false
         assistantIndex = -1 // the persistAsync() below saves the partial reply already in the conversation
         turn++
         emptyWakeTurns = 0
@@ -566,16 +631,13 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
-        /**
-         * Sent with every turn spoken over the lock screen. It is an instruction to the model, not a lock: Hermes
-         * runs its tools on the server, so nothing in this app can stop an action it decides to take.
-         */
-        const val LOCKED_PROMPT =
-            "The phone is locked. Whoever is speaking has not unlocked it, so you can't be sure they are its owner. " +
-                "Answer questions and do read-only things as usual. Before anything that changes something, sends or " +
-                "deletes something, spends money or controls a device (for example sending an email, writing or " +
-                "deleting a file, or changing a setting), do not do it yet: say briefly that it needs the phone " +
-                "unlocked, and ask them to unlock it and ask again."
+        /** Hermes ends a reply with this when the request needs the phone unlocked; the app strips it and prompts. */
+        const val UNLOCK_MARKER = "[[UNLOCK]]"
+        const val UNLOCK_PROTOCOL =
+            "When something needs the phone unlocked, say so in one short sentence and end your reply with the exact " +
+                "text $UNLOCK_MARKER. The app then asks the user to unlock with their fingerprint or PIN and tells you " +
+                "when they have; do not carry out the request until then. Never write $UNLOCK_MARKER for any other reason."
+        const val UNLOCKED_FOLLOW_UP = "I've unlocked the phone. Go ahead with what I asked."
         const val FIRST_PIECE_MAX_CHARS = 90
         const val IDLE_FLUSH_MS = 350L
         const val STALL_MS = 800L

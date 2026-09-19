@@ -227,6 +227,9 @@ screens add `BackHandler { screen = Chat }`.
   caused an idle→wake-fires→relaunch→no-speech→idle feedback loop. There's also an
   `emptyWakeTurns` loop-breaker (`MAX_EMPTY_WAKE=2`) that stops re-arming after 2
   consecutive empty wake turns and requires a tap.
+- **Recreation must not replay the wake/assist intent.** A rotation recreates `MainActivity` with the original
+  intent, so `onCreate` only bumps `assistEpoch` when `savedInstanceState == null`; otherwise rotating would jump to the
+  voice screen and start listening. (`screen` is a plain `remember`, so a rotation still returns to Chat.)
 - **`JarvisRecognitionService` is a deliberate no-op** (returns `ERROR_CLIENT`).
   It exists ONLY because a `VoiceInteractionService` must declare a
   `recognitionService` in `interaction_service.xml`. Deleting it breaks assistant
@@ -265,7 +268,8 @@ screens add `BackHandler { screen = Chat }`.
   (`LocalSttModel.archive`, pinned to GitHub's asset digest, unpacked with the shared `ModelStore.unpack`;
   the unpacked files are size-checked). TTS voices (`LocalTtsStore`, `filesDir/tts/<id>/content/`) are one `.tar.bz2` from
   the sherpa-onnx `tts-models` release (pinned to GitHub's own asset `digest`), unpacked with
-  commons-compress behind a path-traversal guard; a `.complete` marker is written last.
+  commons-compress behind a path-traversal guard; a `.complete` marker is written last. `ModelStore.unpack` drops the
+  archive's top-level folder after ignoring `.` path segments: some tarballs (Parakeet 110M) prefix every entry with `./`.
   Add a model = one catalog entry (verify the file layout and hashes first; several
   `csukuangfj/...` HF repos are empty — those models only exist as release tarballs).
   Model ids double as folder names and are persisted in settings: don't rename them. `LocalTtsStore` deletes
@@ -374,9 +378,15 @@ screens add `BackHandler { screen = Chat }`.
   Conversation screen: no chat history, History list or Settings (API key), and closing it `finish()`es instead of
   opening the chat. `ConversationViewModel` starts a fresh conversation on the first turn of a locked visit
   (`freshConversation`; the earlier one is persisted first) so nothing from earlier chats is shown or sent, and
-  appends `LOCKED_PROMPT` to the system message every turn while locked: answer and read, but ask the user to
-  unlock before anything that changes, sends, deletes, spends or controls. That is an instruction, not a lock:
-  Hermes runs tools server-side and nothing in the app can stop an action it decides to take. A `LOCKED` tag shows.
+  appends the locked-phone instruction to the system message every turn while locked (Settings → "Locked phone":
+  `lockedGuard` toggle + `lockedPrompt`, blank = `SettingsStore.DEFAULT_LOCKED_PROMPT`, which also forbids revealing
+  personal data, tokens and passwords). That is an instruction, not a lock: Hermes runs tools server-side and nothing
+  in the app can stop an action it decides to take. The app always adds `UNLOCK_PROTOCOL` after it: Hermes ends a
+  reply with `[[UNLOCK]]` when a request needs the phone unlocked. `MarkerFilter` strips that from the streamed text
+  (it can be split across chunks), and once the reply has been spoken `finishTurn` asks `MainActivity.requestUnlock`
+  (`KeyguardManager.requestDismissKeyguard`: the system fingerprint/PIN prompt); on success `continueAfterUnlock`
+  sends "I've unlocked the phone…" as a normal user turn so Hermes carries on, and on cancel the screen goes idle
+  (never auto-starts the mic). `ConversationScreen` skips `stopAll` on `ON_STOP` while `unlockInFlight`. A `LOCKED` tag shows.
 - **`ConversationScreen` calls `vm.stopAll()` in both `ON_STOP` and `onDispose`**,
   and `vm.resetView()` in `LaunchedEffect(Unit)` (the VM is retained but the shared
   repo conversation may have been replaced — resetView avoids showing a stale

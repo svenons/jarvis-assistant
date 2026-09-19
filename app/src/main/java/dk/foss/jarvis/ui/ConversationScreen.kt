@@ -60,7 +60,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
 @Composable
-fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: () -> Unit) {
+fun ConversationScreen(
+    vm: ConversationViewModel,
+    assistTrigger: Int,
+    /** Show the system unlock prompt (fingerprint / PIN); calls back with whether the phone got unlocked. */
+    onRequestUnlock: ((Boolean) -> Unit) -> Unit,
+    onExit: () -> Unit,
+) {
     val context = LocalContext.current
     val state by vm.state
     val transcript by vm.transcript
@@ -72,6 +78,7 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val tools = vm.tools
     val ttsNotice by vm.ttsNotice
     val locked by vm.locked
+    val unlockRequested by vm.unlockRequested
 
     val segments = vm.segments
     val speakingIndex by vm.speakingIndex
@@ -108,6 +115,12 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
             }
         }
     }
+    LaunchedEffect(unlockRequested) {
+        if (unlockRequested) {
+            vm.unlockRequested.value = false
+            onRequestUnlock { unlocked -> vm.onUnlockResult(unlocked) }
+        }
+    }
     LaunchedEffect(speakingIndex) {
         if (speakingIndex in 0 until segments.size) {
             listState.animateScrollToItem(speakingIndex)
@@ -116,7 +129,8 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) vm.stopAll()
+            // The unlock prompt can stop the activity briefly; that isn't leaving the conversation.
+            if (event == Lifecycle.Event.ON_STOP && !vm.unlockInFlight) vm.stopAll()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {

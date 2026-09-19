@@ -132,6 +132,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var voiceBrief by remember { mutableStateOf(true) }
     var showReasoning by remember { mutableStateOf(true) }
     var voicePrompt by remember { mutableStateOf("") }
+    var lockedGuard by remember { mutableStateOf(true) }
+    var lockedPrompt by remember { mutableStateOf("") }
     var elevenKey by remember { mutableStateOf("") }
     var elevenVoice by remember { mutableStateOf(SettingsStore.DEFAULT_ELEVEN_VOICE) }
     fun isBatteryExempt(): Boolean {
@@ -204,6 +206,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         store.updateConnection(baseUrl, apiKey, model, provider)
         store.updateVoice(elevenKey, elevenVoice)
         store.updateVoicePrompt(voicePrompt)
+        store.updateLockedPrompt(lockedPrompt)
         store.updateWakeCustomName(wakeCustomName)
         store.updateAssistantName(assistantName)
         val renamed = assistantName.trim().isNotEmpty() && assistantName.trim() != savedName
@@ -283,6 +286,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         voiceBrief = s.voiceBrief
         showReasoning = s.showReasoning
         voicePrompt = s.voicePrompt
+        lockedGuard = s.lockedGuard
+        lockedPrompt = s.lockedPrompt
         elevenKey = s.elevenKey
         elevenVoice = s.elevenVoiceId
         wakeEnabled = s.wakeEnabled
@@ -621,6 +626,60 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Text(
                         "Leave blank for the built-in wording. Sent as a system message on every voice turn, " +
                             "so Hermes follows it without you installing anything on the server.",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Muted,
+                    )
+                }
+
+                SettingsDivider()
+                SectionHeader("Locked phone")
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Protect a locked phone",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "When you talk to the assistant over the lock screen, tell Hermes the phone is locked so it " +
+                                "won\u2019t reveal personal data or change anything. If a request needs unlocking, you are " +
+                                "asked for your fingerprint or PIN and the conversation carries on.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = lockedGuard,
+                        onCheckedChange = {
+                            lockedGuard = it
+                            scope.launch { store.updateLockedGuard(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+                if (lockedGuard) {
+                    OutlinedTextField(
+                        value = lockedPrompt,
+                        onValueChange = { lockedPrompt = it },
+                        label = { Text("Instruction sent while the phone is locked") },
+                        placeholder = { Text(SettingsStore.DEFAULT_LOCKED_PROMPT, maxLines = 3, overflow = TextOverflow.Ellipsis) },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = textFieldColors,
+                    )
+                    Text(
+                        "Leave blank for the built-in wording, which also keeps passwords, tokens and other personal " +
+                            "details out of replies. The request to unlock is added automatically. This is an " +
+                            "instruction to Hermes, not a lock: it runs its tools on your server.",
                         fontFamily = DmSans,
                         fontSize = 12.sp,
                         color = JarvisColors.Muted,

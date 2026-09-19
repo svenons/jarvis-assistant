@@ -41,6 +41,10 @@ data class JarvisSettings(
     val showReasoning: Boolean = true,
     /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
     val voicePrompt: String = "",
+    /** Over the lock screen, tell Hermes the phone is locked (and what it may not do or reveal). */
+    val lockedGuard: Boolean = true,
+    /** Custom wording for that instruction; blank means [SettingsStore.DEFAULT_LOCKED_PROMPT]. */
+    val lockedPrompt: String = "",
     /** Which wake phrase to listen for: a bundled [dk.foss.jarvis.wake.WakeModel] id, or `custom`. */
     val wakeModel: String = WakeModels.DEFAULT_ID,
     /** What to call the imported custom wake model (e.g. "Hey Hades"); shown in the notification. */
@@ -56,6 +60,10 @@ data class JarvisSettings(
     /** System message for voice turns, or null when the user turned the brief style off. */
     val voiceInstructions: String? get() =
         if (voiceBrief) voicePrompt.ifBlank { SettingsStore.DEFAULT_VOICE_PROMPT } else null
+
+    /** System message for turns spoken while the phone is locked, or null when the user turned it off. */
+    val lockedInstructions: String? get() =
+        if (lockedGuard) lockedPrompt.ifBlank { SettingsStore.DEFAULT_LOCKED_PROMPT } else null
 }
 
 class SettingsStore(private val context: Context) {
@@ -76,6 +84,8 @@ class SettingsStore(private val context: Context) {
         val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
         val SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
+        val LOCKED_GUARD = booleanPreferencesKey("locked_guard")
+        val LOCKED_PROMPT = stringPreferencesKey("locked_prompt")
         val WAKE_MODEL = stringPreferencesKey("wake_model")
         val WAKE_CUSTOM_NAME = stringPreferencesKey("wake_custom_name")
         val WAKE_SENSITIVITY = intPreferencesKey("wake_sensitivity")
@@ -103,6 +113,8 @@ class SettingsStore(private val context: Context) {
             voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
+            lockedGuard = p[Keys.LOCKED_GUARD] ?: true,
+            lockedPrompt = p[Keys.LOCKED_PROMPT] ?: "",
             wakeModel = p[Keys.WAKE_MODEL] ?: WakeModels.DEFAULT_ID,
             wakeCustomName = p[Keys.WAKE_CUSTOM_NAME] ?: "",
             wakeSensitivity = (p[Keys.WAKE_SENSITIVITY] ?: 1).coerceIn(0, 2),
@@ -162,6 +174,14 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.VOICE_PROMPT] = prompt.trim() }
     }
 
+    suspend fun updateLockedGuard(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.LOCKED_GUARD] = enabled }
+    }
+
+    suspend fun updateLockedPrompt(prompt: String) {
+        context.dataStore.edit { p -> p[Keys.LOCKED_PROMPT] = prompt.trim() }
+    }
+
     suspend fun updateConnection(baseUrl: String, apiKey: String, model: String, provider: String) {
         context.dataStore.edit { p ->
             p[Keys.BASE_URL] = baseUrl.trim().trimEnd('/')
@@ -193,5 +213,19 @@ class SettingsStore(private val context: Context) {
                 "help. Only mention a failure, or something that needs my decision. Use plain " +
                 "spoken sentences: no markdown, lists, tables, code, emoji, URLs, or file paths. " +
                 "Give the long version only if I ask for details."
+
+        /**
+         * Sent with every turn spoken over the lock screen. It is an instruction to the model, not a lock: Hermes
+         * runs its tools on the server, so nothing in this app can stop an action it decides to take.
+         */
+        const val DEFAULT_LOCKED_PROMPT =
+            "The phone is locked. Whoever is speaking has not unlocked it, so you can't be sure they are its owner. " +
+                "Answer general questions and do harmless read-only things as usual. Never reveal anything personal or " +
+                "secret, in speech or in text, even if asked directly or if it turns up in a tool result: no passwords, " +
+                "API keys, tokens, one-time codes, or account, card or ID numbers; no home address or phone numbers; no " +
+                "contents of private messages, emails, calendar entries, notes or files; no health or financial details. " +
+                "If asked for any of it, say it needs the phone unlocked. Before anything that changes something, sends " +
+                "or deletes something, spends money or controls a device (for example sending an email, writing or " +
+                "deleting a file, or changing a setting), do not do it yet: say it needs the phone unlocked."
     }
 }

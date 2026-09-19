@@ -174,7 +174,9 @@ abstract class ModelStore<M : Any> {
             while (true) {
                 val entry = tar.nextEntry ?: break
                 currentCoroutineContext().ensureActive()
-                val rel = entry.name.substringAfter('/', "")
+                // Some tarballs (Parakeet 110M) prefix every entry with "./"; ignoring "." segments keeps the
+                // top-level folder the first segment, so it is dropped for every archive layout.
+                val rel = entry.name.split('/').filter { it.isNotEmpty() && it != "." }.drop(1).joinToString("/")
                 if (rel.isEmpty()) continue
                 val out = File(dest, rel).canonicalFile
                 if (!out.path.startsWith(base)) throw IOException("Unsafe path in archive: ${entry.name}")
