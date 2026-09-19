@@ -47,15 +47,19 @@ compile + the running app on a device.
 ## CI and releases
 
 Two workflows in `.github/workflows/`: **Build** (PRs into `master` → `:app:assembleDebug`) and **Release**
-(push to `master`, or manual with a bump type → debug APK + tag + GitHub Release). No build artifacts are
-uploaded anywhere. Details and the tested/untested list are in [`docs/releasing.md`](docs/releasing.md). What
-matters when editing:
+(push to `master`, or manual with a bump type → debug APK + tag + GitHub Release). The only artifact CI uploads
+is Build's preview APK, kept 1 day (`retention-days: 1`); releases go to the Releases page. Details and the
+tested/untested list are in [`docs/releasing.md`](docs/releasing.md). What matters when editing:
 
 - **Versioning is by tag, computed from commit messages** (`.github/scripts/next-version.sh`): `type!:` /
   `BREAKING CHANGE:` → major, `feat:` → minor, anything else → patch; first release is `0.1.0`. Write PR
   titles as conventional commits (they become the squash-merge message). `versionCode` =
-  `MAJOR*1000000 + MINOR*1000 + PATCH`. `app/build.gradle` takes `-PappVersionName` / `-PappVersionCode` and
-  defaults to `0.1.0` / `1`; don't hand-edit those defaults to cut a release.
+  `(MAJOR*1000000 + MINOR*1000 + PATCH) * 100`: the last two digits are a slot, `00` for a release, `01`..`99` for
+  a PR preview build (`previous_code + commits since the last release`, capped at 99), so a preview installs
+  over the last release and the next release installs over it. Don't drop the `* 100`: without it consecutive
+  releases have no number between them. `app/build.gradle` takes `-PappVersionName` / `-PappVersionCode` and
+  defaults to `0.1.0` / `1` (a local build with those defaults can't be installed over a release: Android
+  blocks a downgrade, "App not installed"); don't hand-edit those defaults to cut a release.
 - **Releases are debug builds** (`dk.foss.jarvis.debug`, `X.Y.Z-debug`), deliberately: this is a sideloaded
   app. Every debug build (local and CI) is signed with the committed `app/debug.keystore` — the standard
   auto-generated Android debug key (`android` / `androiddebugkey`), copied from the maintainer's

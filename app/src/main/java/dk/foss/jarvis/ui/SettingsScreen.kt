@@ -320,14 +320,17 @@ fun SettingsScreen(onBack: () -> Unit) {
         ttsModelId = s.localTtsModel
         wakeModelId = s.wakeModel
         wakeCustomName = s.wakeCustomName
-        // With a connection already saved, offer Hermes's model names without waiting for "Save & test".
+        wakeSensitivity = s.wakeSensitivity
+        // Unblock the screen before touching the network: "Save & test" is gated on `loaded`, and an unreachable
+        // Hermes (exactly when you need that button) would otherwise keep it disabled until these calls time out.
+        loaded = true
+        // With a connection already saved, offer Hermes's model names without waiting for "Save & test". Only a
+        // success is applied, so a slow failure can't wipe the lists a "Save & test" filled in meanwhile.
         if (s.isConfigured) {
             val hermes = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess)
-            hermesModels = hermes.fetchModels().getOrDefault(emptyList())
-            modelOptions = hermes.fetchModelOptions().getOrNull()
+            hermes.fetchModels().onSuccess { hermesModels = it }
+            hermes.fetchModelOptions().getOrNull()?.let { modelOptions = it }
         }
-        wakeSensitivity = s.wakeSensitivity
-        loaded = true
     }
 
     LaunchedEffect(Unit) {

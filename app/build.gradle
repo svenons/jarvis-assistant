@@ -32,7 +32,7 @@ android {
         applicationId "dk.foss.jarvis"
         minSdk 29
         targetSdk 34
-        // CI passes the real version (-PappVersionName=1.2.3 -PappVersionCode=1002003); see
+        // CI passes the real version (-PappVersionName=1.2.3 -PappVersionCode=100200300); see
         // .github/scripts/next-version.sh. These defaults are what a local build gets.
         versionCode((project.findProperty("appVersionCode") ?: "1") as int)
         versionName(project.findProperty("appVersionName") ?: "0.1.0")
