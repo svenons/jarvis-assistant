@@ -39,8 +39,13 @@ data class JarvisSettings(
     val voiceBrief: Boolean = true,
     /** After each turn, fetch Hermes's stored reasoning and tool calls and add them to history. */
     val showReasoning: Boolean = true,
-    /** Where a task sent "in the background" delivers its answer: a Hermes home channel (`telegram`, `discord`, ...) or `all`. */
+    /**
+     * Where a task handed to Hermes in the background delivers its answer: a Hermes home channel (`telegram`,
+     * `discord`, ...), `all`, or [SettingsStore.DELIVER_OFF] for nowhere.
+     */
     val deliverTarget: String = SettingsStore.DEFAULT_DELIVER_TARGET,
+    /** Also send the answer of a task you left running (closed the screen or the app) to [deliverTarget] when it finishes. */
+    val relayLeft: Boolean = true,
     /**
      * Send each turn as a Hermes run, so it keeps going on the server when the app is left and only Cancel stops it.
      * Off = the plain chat stream, which Hermes cancels as soon as the app disconnects.
@@ -63,6 +68,7 @@ data class JarvisSettings(
     /** What the assistant is called in the app and its notifications (never blank). */
     val assistantName: String = BuildConfig.DEFAULT_ASSISTANT_NAME,
 ) {
+    val deliverEnabled: Boolean get() = deliverTarget != SettingsStore.DELIVER_OFF
     val isConfigured: Boolean get() = baseUrl.isNotEmpty() && apiKey.isNotEmpty()
     val useElevenLabs: Boolean get() = elevenKey.isNotEmpty() && elevenVoiceId.isNotEmpty()
 
@@ -94,6 +100,7 @@ class SettingsStore(private val context: Context) {
         val SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
         val DELIVER_TARGET = stringPreferencesKey("deliver_target")
+        val RELAY_LEFT = booleanPreferencesKey("relay_left")
         val USE_RUNS = booleanPreferencesKey("use_runs")
         val THINKING = stringPreferencesKey("thinking")
         val LOCKED_GUARD = booleanPreferencesKey("locked_guard")
@@ -126,6 +133,7 @@ class SettingsStore(private val context: Context) {
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
             deliverTarget = (p[Keys.DELIVER_TARGET] ?: "").ifBlank { DEFAULT_DELIVER_TARGET },
+            relayLeft = p[Keys.RELAY_LEFT] ?: true,
             useRuns = p[Keys.USE_RUNS] ?: true,
             thinking = (p[Keys.THINKING] ?: "").takeIf { v -> THINKING_LEVELS.any { it.first == v } } ?: "",
             lockedGuard = p[Keys.LOCKED_GUARD] ?: true,
@@ -193,6 +201,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.DELIVER_TARGET] = target.trim().lowercase().ifEmpty { DEFAULT_DELIVER_TARGET } }
     }
 
+    suspend fun updateRelayLeft(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.RELAY_LEFT] = enabled }
+    }
+
     suspend fun updateUseRuns(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.USE_RUNS] = enabled }
     }
@@ -231,6 +243,22 @@ class SettingsStore(private val context: Context) {
         const val LEGACY_MODEL = "kimi-for-coding" // prior default; migrated to DEFAULT_MODEL
         const val DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"
         const val DEFAULT_DELIVER_TARGET = "telegram"
+        const val DELIVER_OFF = "off"
+
+        /** Hermes home channels a task can be delivered to (value, label). Any other `deliver` value can still be typed. */
+        val DELIVER_TARGETS = listOf(
+            "telegram" to "Telegram",
+            "discord" to "Discord",
+            "slack" to "Slack",
+            "whatsapp" to "WhatsApp",
+            "signal" to "Signal",
+            "matrix" to "Matrix",
+            "mattermost" to "Mattermost",
+            "email" to "Email",
+            "sms" to "SMS",
+            "all" to "Every connected channel",
+            DELIVER_OFF to "Off (don\u2019t send anywhere)",
+        )
 
         /** Thinking levels Hermes accepts as `reasoning_effort` (value, label); the blank value leaves it to Hermes. */
         val THINKING_LEVELS = listOf(

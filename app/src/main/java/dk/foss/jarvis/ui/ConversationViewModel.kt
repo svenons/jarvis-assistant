@@ -653,6 +653,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         return androidFallback
     }
 
+    /**
+     * Stop button (Thinking or Speaking): end the turn and go idle, without listening. A run still going on the server is
+     * cancelled for good; the partial reply that was already shown stays in the conversation.
+     */
+    fun onStopTap() {
+        currentTurnFromWake = false
+        beginTurn() // invalidates callbacks, stops the run (stopTurn), speech and the pipeline
+        goIdle()
+    }
+
     fun onMicTap() {
         when (state.value) {
             ConvState.Listening -> { turn++; recognizer?.stop(); goIdle() }

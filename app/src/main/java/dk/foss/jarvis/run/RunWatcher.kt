@@ -144,10 +144,31 @@ class RunWatcher private constructor(private val app: Context) {
         val text = repo.completeRun(entry.conversationId, entry.runId, outcome)
         Log.d(TAG, "run ${entry.runId} ended: ${outcome::class.simpleName}")
         RunService.sync(app)
-        if (text != null && outcome !is RunOutcome.Cancelled) notifyDone(entry, outcome, text)
+        // Only for a run nobody was listening to, and only when the user isn't looking at the app (same rule as the notification).
+        val sentTo = if (text != null && outcome is RunOutcome.Completed && !appVisible) relayToChannel(outcome.output) else null
+        if (text != null && outcome !is RunOutcome.Cancelled) notifyDone(entry, outcome, text, sentTo)
     }
 
-    private suspend fun notifyDone(entry: Entry, outcome: RunOutcome, text: String) {
+    /**
+     * Send the answer of a task the user left running to their delivery channel (Settings). A run can't message a channel
+     * itself (the API server has no send_message tool), so this hands the text to a one-shot job whose whole task is to
+     * pass it on; Hermes delivers that job's reply. Returns the channel it was sent to, or null (off, nothing to send, or
+     * Hermes refused: the answer is still in the conversation and the notification).
+     */
+    private suspend fun relayToChannel(output: String): String? {
+        val s = settings.settings.first()
+        val text = output.trim()
+        if (!s.relayLeft || !s.deliverEnabled || !s.isConfigured || text.isEmpty()) return null
+        val head = "Deliver the message below to the user. Reply with exactly that text and nothing else: do not add, " +
+            "change, summarize or comment on it, and do not use any tools.\n\n"
+        val body = if (head.length + text.length <= MAX_JOB_PROMPT) text else text.take(MAX_JOB_PROMPT - head.length - 1) + "\u2026"
+        return HermesClient(s.baseUrl, s.apiKey).createBackgroundJob("Jarvis: answer", head + body, s.deliverTarget)
+            .onFailure { Log.w(TAG, "sending the answer to ${s.deliverTarget} failed: ${it.message}") }
+            .map { s.deliverTarget }
+            .getOrNull()
+    }
+
+    private suspend fun notifyDone(entry: Entry, outcome: RunOutcome, text: String, sentTo: String?) {
         if (appVisible) return
         val nm = NotificationManagerCompat.from(app)
         if (!nm.areNotificationsEnabled()) return
@@ -169,6 +190,7 @@ class RunWatcher private constructor(private val app: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(1500)))
             .setContentIntent(open)
             .setAutoCancel(true)
+            .apply { if (sentTo != null) setSubText("Also sent to $sentTo") }
             .build()
         runCatching { nm.notify(entry.runId.hashCode(), notif) } // POST_NOTIFICATIONS may still be denied
     }
@@ -176,6 +198,7 @@ class RunWatcher private constructor(private val app: Context) {
     companion object {
         private const val TAG = "RunWatcher"
         private const val GIVE_UP_MS = 24L * 60 * 60 * 1000
+        private const val MAX_JOB_PROMPT = 4900 // Hermes rejects job prompts over 5000 characters
         const val CHANNEL_ONGOING = "jarvis_run_ongoing"
         const val CHANNEL_DONE = "jarvis_run_done"
 

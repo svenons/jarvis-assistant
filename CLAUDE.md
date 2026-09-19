@@ -339,8 +339,10 @@ screens add `BackHandler { screen = Chat }`.
   moment the client disconnects (`_abandon_agent_task` hard-interrupts the agent); a run (`POST /v1/runs`) is its own
   server task that outlives its event stream. `HermesClient.sendTurn` returns a `TurnHandle`: `detach()` stops
   listening (the run goes on), `stop()` is the only real cancel (`POST /v1/runs/{id}/stop`). Rules the view models
-  follow: leaving (`stopAll`, `resetView`, `onCleared`, screen closed, app backgrounded or swiped away) = detach;
-  Stop / Cancel / interrupting a voice turn with a mic tap = stop. `Settings → Keep working when I leave`
+  follow: leaving (`stopAll`, `resetView`, `onCleared`, the voice screen's X, app backgrounded or swiped away) = detach;
+  Stop / Cancel = stop. On the voice screen, Thinking and Speaking show a labelled **Stop** (`onStopTap`: `beginTurn()` then
+  `goIdle()`, so it ends the turn and does *not* listen) next to the mic (`onMicTap`: talk over it, which also stops the
+  turn but then listens); X never listens, it only leaves. `Settings → Keep working when I leave`
   (`useRuns`, default on) turns this off; a server answering 404/405/501 to `/v1/runs` falls back to the chat stream
   automatically, where a turn can't outlive the app and there is no `PendingRun`.
 - **A run in flight is saved with the conversation** (`Conversation.pendingRun`, default null for old files), set in
@@ -361,19 +363,23 @@ screens add `BackHandler { screen = Chat }`.
 - **Approvals are always denied.** A run pauses on `approval.request` until answered. Jarvis never approves for the
   user: the client immediately posts `{"choice":"deny","resolve_all":true}` to `/v1/runs/{id}/approval` and shows a
   "Denied, needs your approval" tool line, so a run can't hang. This is new with runs: the chat stream never paused.
-- **The chat's "→ Telegram" button hands a task to Hermes's Jobs API, not to a run.** A run can't message a channel (the
-  API-server toolset has no `send_message`), but a cron job can: `HermesClient.createBackgroundJob` does
+- **Delivery to a channel goes through Hermes's Jobs API, never a run.** A run can't message a channel (the API-server
+  toolset has no `send_message`), but a cron job can: `HermesClient.createBackgroundJob` does
   `POST /api/jobs {name, prompt, schedule:"in 1m", deliver, repeat:1}` then `POST /api/jobs/{id}/run` (documented "run now":
-  it fires at the next scheduler tick, which is every 60 s). `deliver` is `Settings → Send background tasks to`
-  (`deliverTarget`, default `telegram`): a platform's **home channel** (`/sethome` on the server) or `all`; without `deliver`
-  Hermes only saves the output to a file. Facts from the Hermes source: the create body needs `name`, `schedule`, `prompt`
-  (≤ 5000 chars, injection-scanned: a 400 carries the reason, which the app shows); `reasoning_effort` is **not** accepted
-  on create, so the Thinking setting doesn't apply; a job runs in a **fresh session with no chat context**, so
-  `ChatViewModel.backgroundPrompt` puts the last few messages in the prompt (older context is cut first); the answer is
-  **not** added to the chat, only a "Sent as a background task" note (a tool-role message, never sent to Hermes). Known gaps:
-  Hermes validates `deliver` only when the job fires, so a platform with no home channel is accepted and then fails on
+  it fires at the next scheduler tick, every 60 s). `deliver` is `Settings → Send finished tasks to` (`deliverTarget`, a
+  dropdown of `SettingsStore.DELIVER_TARGETS`, default `telegram`, editable for `telegram:<id>` / `discord:#chan`;
+  `DELIVER_OFF` disables both uses below): a platform's **home channel** (`/sethome` on the server) or `all`; without
+  `deliver` Hermes only saves the output to a file. Two uses: (1) the chat's "→ Telegram" button
+  (`ChatViewModel.sendInBackground`) sends the typed task as a job; (2) `RunWatcher.relayToChannel` sends the *answer* of
+  a run the user **left running** (detached, so only when the watcher concludes it) when the app is not on screen, if
+  `relayLeft` is on: a job whose whole prompt is "reply with exactly this text", since the run itself can't deliver.
+  Facts from the Hermes source: the create body needs `name`, `schedule`, `prompt` (≤ 5000 chars, injection-scanned: a 400
+  carries the reason; the relay just logs it and the answer still reaches History and the notification); `reasoning_effort`
+  is **not** accepted on create; a job runs in a **fresh session with no chat context**, so `backgroundPrompt` puts the last
+  few messages in a button task's prompt; the relayed reply may be reworded slightly and costs one extra request. Known
+  gaps: Hermes validates `deliver` only when the job fires, so a platform with no home channel is accepted and then fails on
   the server as `last_status = delivery_failed`, which the app does not see; and finished one-shot jobs stay in the job list
-  as `completed` (clean up server-side with `hermes cron remove`).
+  as `completed` (clean up with `hermes cron remove`).
 - **Voice turns send a `system` message.** `JarvisSettings.voiceInstructions` (toggle + editable text,
   default `SettingsStore.DEFAULT_VOICE_PROMPT`) is passed as `streamChat(systemPrompt = …)` from
   `ConversationViewModel` only — text chat is unaffected. Hermes layers a request `system` message on top of

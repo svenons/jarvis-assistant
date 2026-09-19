@@ -130,6 +130,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var thinking by remember { mutableStateOf("") }
     var useRuns by remember { mutableStateOf(true) }
     var deliverTarget by remember { mutableStateOf(SettingsStore.DEFAULT_DELIVER_TARGET) }
+    var deliverMenu by remember { mutableStateOf(false) }
+    var relayLeft by remember { mutableStateOf(true) }
     var thinkingMenu by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf("") }
     var savedName by remember { mutableStateOf("") } // last name the wake service was told about
@@ -294,6 +296,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         thinking = s.thinking
         useRuns = s.useRuns
         deliverTarget = s.deliverTarget
+        relayLeft = s.relayLeft
         lockedGuard = s.lockedGuard
         lockedPrompt = s.lockedPrompt
         elevenKey = s.elevenKey
@@ -546,22 +549,69 @@ fun SettingsScreen(onBack: () -> Unit) {
                     color = JarvisColors.Muted,
                 )
 
-                OutlinedTextField(
-                    value = deliverTarget,
-                    onValueChange = { deliverTarget = it },
-                    label = { Text("Send background tasks to") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = textFieldColors,
-                )
+                ExposedDropdownMenuBox(expanded = deliverMenu, onExpandedChange = { deliverMenu = it }) {
+                    OutlinedTextField(
+                        value = deliverTarget,
+                        onValueChange = { deliverTarget = it }, // also accepts e.g. telegram:<chat id> or discord:#channel
+                        label = { Text("Send finished tasks to") },
+                        singleLine = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = deliverMenu) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        colors = textFieldColors,
+                    )
+                    ExposedDropdownMenu(expanded = deliverMenu, onDismissRequest = { deliverMenu = false }) {
+                        SettingsStore.DELIVER_TARGETS.forEach { (value, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    deliverTarget = value
+                                    deliverMenu = false
+                                    scope.launch { store.updateDeliverTarget(value) }
+                                },
+                            )
+                        }
+                    }
+                }
                 Text(
-                    "The chat\u2019s \u201C\u2192\u201D button hands a task to Hermes, which finishes it on your server and sends the " +
-                        "answer to this channel: telegram, discord, slack, signal, email\u2026 or all. It is that platform\u2019s " +
-                        "home channel, so it must be set on the server first (send /sethome in that chat).",
+                    "Where Hermes sends the answer of a task done in the background: that platform\u2019s home channel, which " +
+                        "must be set on the server first (send /sethome in that chat). Used by the chat\u2019s \u201C\u2192\u201D " +
+                        "button, and by the switch below. Off turns both off.",
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
                 )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Also send tasks I leave running",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "If you close the screen or the app while Hermes is still working, it carries on by itself, and when " +
+                                "it finishes and you\u2019re not looking at the app, the answer is also sent to that channel. " +
+                                "Uses one short extra request to Hermes, which may reword the message slightly.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = relayLeft,
+                        onCheckedChange = {
+                            relayLeft = it
+                            scope.launch { store.updateRelayLeft(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
 
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.weight(1f)) {

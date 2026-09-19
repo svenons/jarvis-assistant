@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.data.UiMessage
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -309,7 +310,7 @@ private fun InputBar(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { if (!streaming && !blocked) onSend() }),
             )
-            if (!streaming && value.isNotBlank()) {
+            if (!streaming && value.isNotBlank() && channel != SettingsStore.DELIVER_OFF) {
                 // Hand the task to Hermes to finish on the server and deliver to the home channel (Settings).
                 TextButton(onClick = onSendInBackground) {
                     Text("\u2192 ${channel.replaceFirstChar { it.uppercase() }}", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Cyan)

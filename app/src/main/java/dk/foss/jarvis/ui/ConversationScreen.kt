@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -196,6 +198,7 @@ fun ConversationScreen(
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
+                        onStop = { vm.onStopTap() },
                     )
                     ConvState.Speaking -> SpeakingContent(
                         segments = segments,
@@ -208,6 +211,7 @@ fun ConversationScreen(
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
+                        onStop = { vm.onStopTap() },
                     )
                 }
             }
@@ -398,7 +402,7 @@ private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
 }
 
 @Composable
-private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit) {
+private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit, onStop: () -> Unit) {
     // Blinking dots
     val transition = rememberInfiniteTransition(label = "blink")
     val dot1 by transition.animateFloat(
@@ -478,7 +482,8 @@ private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<To
             }
         }
 
-        MicFab(
+        VoiceControls(
+            onStop = onStop,
             onMicTap = onMicTap,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -496,6 +501,7 @@ private fun SpeakingContent(
     tools: List<ToolStep>,
     notice: String?,
     onMicTap: () -> Unit,
+    onStop: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
         Column(
@@ -576,12 +582,43 @@ private fun SpeakingContent(
             }
         }
 
-        MicFab(
+        VoiceControls(
+            onStop = onStop,
             onMicTap = onMicTap,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 24.dp),
         )
+    }
+}
+
+/**
+ * Bottom controls while Hermes is thinking or speaking. Stop ends the turn and goes idle (no listening), which is what
+ * cancelling should do; the mic is for talking over it: it ends the turn and listens.
+ */
+@Composable
+private fun VoiceControls(onStop: () -> Unit, onMicTap: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(32.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(JarvisColors.GlassBg)
+                    .border(1.dp, JarvisColors.Cyan.copy(alpha = 0.4f), CircleShape)
+                    .clickable { onStop() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(28.dp), tint = JarvisColors.TextPrimary)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("Stop", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextSecondary)
+        }
+        MicFab(onMicTap = onMicTap)
     }
 }
 
