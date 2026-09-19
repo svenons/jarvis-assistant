@@ -28,7 +28,7 @@ import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-enum class ConvState { Idle, Listening, Thinking, Speaking }
+enum class ConvState { Idle, Connecting, Listening, Thinking, Speaking }
 
 class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -47,6 +47,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val hint = mutableStateOf<String?>(null)
     /** Set when the voice couldn't speak a sentence, so it is never skipped silently. Cleared each turn. */
     val ttsNotice = mutableStateOf<String?>(null)
+    /** Where [sendReplyToChannel] ("Send to <channel>", Speaking screen) delivers to — Settings → Send finished
+     *  tasks to, same as the chat's "→" button. Shown on the button so it's clear where a tap will send the reply. */
+    val deliverTarget = mutableStateOf(SettingsStore.DEFAULT_DELIVER_TARGET)
+    /** Result of the last [sendReplyToChannel] tap ("Sent to your telegram." / a failure). Cleared each turn. */
+    val deliveryNotice = mutableStateOf<String?>(null)
     /** The lock screen is up, so anything that changes something needs the phone unlocked first. */
     val locked = mutableStateOf(false)
     // Opened over the lock screen: the first turn starts a fresh conversation, so nothing from earlier chats is sent.
@@ -109,6 +114,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch { ensureReady() }
+        viewModelScope.launch { settingsStore.settings.collect { deliverTarget.value = it.deliverTarget } }
     }
 
     private suspend fun ensureReady() {
@@ -147,6 +153,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Set up a turn that keeps the conversation going and owns the mic (or speaker) until it ends. */
     private fun claimTurn(fromWake: Boolean) {
+        // Bumped here (not just in beginTurn) so the pre-flight checks below — which run before beginTurn and can
+        // take a few seconds (reachability) — are themselves invalidated by a cancel or a newer start, same as
+        // any other in-flight async work.
+        turn++
         // A conversation auto-continues: after Jarvis speaks it listens again.
         continuous = true
         retriedThisTurn = false
@@ -159,8 +169,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startListening(fromWake: Boolean = false) {
         claimTurn(fromWake)
+        val myTurn = turn
+        // Immediate feedback: without this the screen sits unchanged for however long ensureReady()/isReachable()
+        // take (up to a few seconds off-network), which looks broken rather than working.
+        error.value = null
+        hint.value = null
+        state.value = ConvState.Connecting
         viewModelScope.launch {
             ensureReady()
+            if (turn != myTurn) return@launch // cancelled, or superseded by another start, while loading
             val s = settings
             if (s == null || !s.isConfigured) {
                 error.value = "Configure Hermes in Settings first."
@@ -169,7 +186,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Check reachability before committing to a listen: otherwise being off the right network (e.g. away
             // from home wifi) only surfaces after the mic recorded and STT transcribed, for nothing.
-            if (!HermesClient(s.baseUrl, s.apiKey).isReachable()) {
+            val reachable = HermesClient(s.baseUrl, s.apiKey).isReachable()
+            if (turn != myTurn) return@launch
+            if (!reachable) {
                 error.value = "No connection to Hermes. Check your wifi, or set up a VPN/tunnel to reach it from outside your network."
                 state.value = ConvState.Idle
                 return@launch
@@ -249,6 +268,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         pendingSpeech = 0
         ttsFailures = 0
         ttsNotice.value = null
+        deliveryNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -671,9 +691,35 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         goIdle()
     }
 
+    /**
+     * "Send to <channel>" (Speaking screen): relay the reply that's currently being shown/spoken to the delivery
+     * channel (Settings → Send finished tasks to), the same one the chat's "→" button uses. Voice has no text box
+     * to hand that button a task, so this instead sends the answer you already got — for when you want it kept or
+     * shared as a message rather than only spoken. Independent of the live turn: it neither stops nor is stopped
+     * by it, and failure is reported in [deliveryNotice], never routed through [error]/[hint].
+     */
+    fun sendReplyToChannel() {
+        val text = reply.value.trim()
+        if (text.isEmpty()) return
+        viewModelScope.launch {
+            val s = settings ?: settingsStore.settings.first().also { settings = it }
+            if (!s.isConfigured || !s.deliverEnabled) return@launch
+            val target = s.deliverTarget
+            deliveryNotice.value = null
+            val head = "Deliver the message below to the user. Reply with exactly that text and nothing else: do not add, " +
+                "change, summarize or comment on it, and do not use any tools.\n\n"
+            val body = if (head.length + text.length <= MAX_JOB_PROMPT) text else text.take(MAX_JOB_PROMPT - head.length - 1) + "…"
+            HermesClient(s.baseUrl, s.apiKey).createBackgroundJob("Jarvis: answer", head + body, target)
+                .onSuccess { deliveryNotice.value = "Sent to your $target." }
+                .onFailure { deliveryNotice.value = "Couldn’t send to $target: ${it.message}" }
+        }
+    }
+
     fun onMicTap() {
         when (state.value) {
-            ConvState.Listening -> { turn++; recognizer?.stop(); goIdle() }
+            // Connecting has no recognizer running yet (recognizer?.stop() is then a harmless no-op) — the tap
+            // just cancels the pending checks via the turn bump.
+            ConvState.Listening, ConvState.Connecting -> { turn++; recognizer?.stop(); goIdle() }
             else -> startListening()
         }
     }
@@ -701,6 +747,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         speaking = false
         pendingSpeech = 0
         ttsNotice.value = null
+        deliveryNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -741,5 +788,6 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         const val STALL_MS = 800L
         const val WAKE_REARM_DELAY_MS = 1200L
         const val MAX_EMPTY_WAKE = 2 // consecutive empty wake turns before requiring a tap
+        const val MAX_JOB_PROMPT = 4900 // Hermes rejects job prompts over 5000 characters
     }
 }
