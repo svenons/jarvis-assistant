@@ -41,6 +41,8 @@ class HermesClient(
         sessionId: String?,
         cb: StreamCallbacks,
         systemPrompt: String? = null,
+        /** Thinking level (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); blank = Hermes's own setting. */
+        reasoningEffort: String? = null,
     ): EventSource {
         // Hermes layers a `system` message on top of its own prompt for this request only
         // (it isn't stored in the session), so it's re-sent every turn.
@@ -48,7 +50,10 @@ class HermesClient(
         else listOf(ChatMessage("system", systemPrompt)) + messages
         val body = json.encodeToString(
             ChatRequest.serializer(),
-            ChatRequest(model = model, messages = outgoing, stream = true, provider = provider?.ifBlank { null }),
+            ChatRequest(
+                model = model, messages = outgoing, stream = true, provider = provider?.ifBlank { null },
+                modelOptions = reasoningEffort?.ifBlank { null }?.let { ModelOptions(it) },
+            ),
         )
         val builder = Request.Builder()
             .url("$baseUrl/v1/chat/completions")

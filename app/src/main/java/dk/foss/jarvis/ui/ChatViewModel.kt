@@ -97,7 +97,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     currentSource = null
                     repo.persistAsync()
                 }
-            })
+            }, reasoningEffort = s.thinking)
         }
     }
 

@@ -347,7 +347,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 endReply() // keep any partial reply that arrived before the failure
                 goIdle()
             }
-        }, systemPrompt = systemPromptFor(s))
+        }, systemPrompt = systemPromptFor(s), reasoningEffort = s.thinking)
     }
 
     private fun isPhoneLocked(): Boolean =

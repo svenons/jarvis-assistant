@@ -1,5 +1,6 @@
 package dk.foss.jarvis.hermes
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
@@ -13,7 +14,13 @@ data class ChatRequest(
     val stream: Boolean = true,
     /** Hermes provider slug. Without it, Hermes ignores `model` unless direct_model_requests is on. */
     val provider: String? = null,
+    /** Per-request overrides Hermes reads (`model_options`); omitted when nothing is set. */
+    @SerialName("model_options") val modelOptions: ModelOptions? = null,
 )
+
+/** How hard the model thinks: `none` (off), `minimal` … `max`. Hermes ignores an unrecognised value. */
+@Serializable
+data class ModelOptions(@SerialName("reasoning_effort") val reasoningEffort: String? = null)
 
 // --- streaming response (OpenAI chat.completion.chunk) ---
 

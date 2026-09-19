@@ -303,6 +303,12 @@ screens add `BackHandler { screen = Chat }`.
   real catalog `{providers:[{slug,name,authenticated,models,featured_models,total_models}], model, provider}`.
   Picking a provider model sets Model **and** Provider together, which is what makes Hermes honour it; providers
   with `authenticated=false` are not offered. Both fetches fail quietly (older Hermes) and the field stays free text.
+- **Thinking effort is a per-request field.** Settings → "Thinking effort" (`JarvisSettings.thinking`, one of
+  `SettingsStore.THINKING_LEVELS`, blank = Hermes default) is sent as `model_options.reasoning_effort` on every
+  `/v1/chat/completions` request (`ChatRequest.modelOptions`, omitted when blank). Hermes's `parse_reasoning_effort` maps
+  `none` to "reasoning disabled" and ignores an unrecognised value (falls back to its own default), so an older or odd
+  server degrades quietly. Levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (`ultra` is Hermes-internal
+  and clamped to `max`, so it is not offered). Not verified against a live server.
 - **Tool activity is shown, reasoning is not available.** Hermes' `/v1/chat/completions` stream carries
   only content deltas plus a custom SSE event `hermes.tool.progress` (`{tool, emoji, label, toolCallId,
   status: running|completed}`; `_`-prefixed internal tools are filtered server-side; a `completed` without a

@@ -127,6 +127,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var modelOptions by remember { mutableStateOf<ModelOptionsResponse?>(null) }
     var modelMenu by remember { mutableStateOf(false) }
     var provider by remember { mutableStateOf("") }
+    var thinking by remember { mutableStateOf("") }
+    var thinkingMenu by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf("") }
     var savedName by remember { mutableStateOf("") } // last name the wake service was told about
     var voiceBrief by remember { mutableStateOf(true) }
@@ -286,6 +288,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         voiceBrief = s.voiceBrief
         showReasoning = s.showReasoning
         voicePrompt = s.voicePrompt
+        thinking = s.thinking
         lockedGuard = s.lockedGuard
         lockedPrompt = s.lockedPrompt
         elevenKey = s.elevenKey
@@ -502,6 +505,37 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
                 Text(
                     modelHelp(model.trim(), provider.trim(), hermesModels, modelOptions),
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                )
+
+                ExposedDropdownMenuBox(expanded = thinkingMenu, onExpandedChange = { thinkingMenu = it }) {
+                    OutlinedTextField(
+                        value = SettingsStore.THINKING_LEVELS.firstOrNull { it.first == thinking }?.second ?: "Hermes default",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Thinking effort") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = thinkingMenu) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        colors = textFieldColors,
+                    )
+                    ExposedDropdownMenu(expanded = thinkingMenu, onDismissRequest = { thinkingMenu = false }) {
+                        SettingsStore.THINKING_LEVELS.forEach { (value, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                onClick = {
+                                    thinking = value
+                                    thinkingMenu = false
+                                    scope.launch { store.updateThinking(value) }
+                                },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "How long the model reasons before answering, sent with every message. Lower is faster and cheaper " +
+                        "(good for voice); higher is better for hard problems. Hermes default follows your server\u2019s setting.",
                     fontFamily = DmSans,
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,

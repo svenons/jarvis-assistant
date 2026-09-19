@@ -39,6 +39,8 @@ data class JarvisSettings(
     val voiceBrief: Boolean = true,
     /** After each turn, fetch Hermes's stored reasoning and tool calls and add them to history. */
     val showReasoning: Boolean = true,
+    /** How hard Hermes thinks on every request (see [SettingsStore.THINKING_LEVELS]); blank = Hermes's own setting. */
+    val thinking: String = "",
     /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
     val voicePrompt: String = "",
     /** Over the lock screen, tell Hermes the phone is locked (and what it may not do or reveal). */
@@ -84,6 +86,7 @@ class SettingsStore(private val context: Context) {
         val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
         val SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
+        val THINKING = stringPreferencesKey("thinking")
         val LOCKED_GUARD = booleanPreferencesKey("locked_guard")
         val LOCKED_PROMPT = stringPreferencesKey("locked_prompt")
         val WAKE_MODEL = stringPreferencesKey("wake_model")
@@ -113,6 +116,7 @@ class SettingsStore(private val context: Context) {
             voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
+            thinking = (p[Keys.THINKING] ?: "").takeIf { v -> THINKING_LEVELS.any { it.first == v } } ?: "",
             lockedGuard = p[Keys.LOCKED_GUARD] ?: true,
             lockedPrompt = p[Keys.LOCKED_PROMPT] ?: "",
             wakeModel = p[Keys.WAKE_MODEL] ?: WakeModels.DEFAULT_ID,
@@ -174,6 +178,10 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.VOICE_PROMPT] = prompt.trim() }
     }
 
+    suspend fun updateThinking(level: String) {
+        context.dataStore.edit { p -> p[Keys.THINKING] = level }
+    }
+
     suspend fun updateLockedGuard(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.LOCKED_GUARD] = enabled }
     }
@@ -203,6 +211,18 @@ class SettingsStore(private val context: Context) {
         const val DEFAULT_MODEL = "hermes-agent"
         const val LEGACY_MODEL = "kimi-for-coding" // prior default; migrated to DEFAULT_MODEL
         const val DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"
+
+        /** Thinking levels Hermes accepts as `reasoning_effort` (value, label); the blank value leaves it to Hermes. */
+        val THINKING_LEVELS = listOf(
+            "" to "Hermes default",
+            "none" to "Off",
+            "minimal" to "Minimal",
+            "low" to "Low",
+            "medium" to "Medium",
+            "high" to "High",
+            "xhigh" to "Extra high",
+            "max" to "Max",
+        )
 
         /** Sent as a `system` message on voice turns so replies are short enough to listen to. */
         const val DEFAULT_VOICE_PROMPT =
