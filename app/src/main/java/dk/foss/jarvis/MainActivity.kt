@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +50,13 @@ class MainActivity : ComponentActivity() {
     // Incremented each time the assistant is triggered; observed by Compose to
     // jump into conversation mode (works for both cold start and onNewIntent).
     private var assistEpoch by mutableStateOf(0)
+
+    // Incremented ONLY for a genuine "Hey Jarvis" wake-word detection (EXTRA_FROM_ASSIST), never for a bare
+    // ACTION_ASSIST (the system assistant gesture, e.g. long-press home) or a plain app launch. assistEpoch
+    // above still navigates to the voice screen for any of those, but only a fresh wakeEpoch (or an explicit
+    // mic tap) makes the voice screen start listening on its own — otherwise it lands on Idle and waits for a
+    // tap, so an accidental assist-gesture or app open doesn't record audio ("butt dials").
+    private var wakeEpoch by mutableStateOf(0)
 
     // True while the lock screen is up. Opened over it (wake word / assist gesture), the app shows only the voice
     // screen: no chat history, no conversation list, no Settings (which holds the API key), and closing it leaves
@@ -101,7 +109,10 @@ class MainActivity : ComponentActivity() {
             // A rotation (or any recreation) hands us the original wake/assist intent again. Only a real launch
             // (no saved state) is a trigger; replaying it on rotation would jump to the voice screen and start
             // listening. The lock-screen flags are per-instance, so they are re-applied either way.
-            if (savedInstanceState == null) assistEpoch++
+            if (savedInstanceState == null) {
+                assistEpoch++
+                if (intent.getBooleanExtra(EXTRA_FROM_ASSIST, false)) wakeEpoch++
+            }
             showOverLockScreen()
         }
         refreshLocked()
@@ -130,6 +141,10 @@ class MainActivity : ComponentActivity() {
                 var screen by remember {
                     mutableStateOf(if (assistEpoch > 0) Screen.Conversation else Screen.Chat)
                 }
+                // Persist across Chat<->Conversation switches (this part of the tree never unmounts) so an
+                // unrelated recomposition doesn't replay a trigger that was already consumed.
+                var consumedWakeEpoch by remember { mutableStateOf(0) }
+                var manualVoiceTap by remember { mutableStateOf(false) }
                 LaunchedEffect(assistEpoch) {
                     if (assistEpoch > 0) screen = Screen.Conversation
                 }
@@ -140,7 +155,7 @@ class MainActivity : ComponentActivity() {
                         ChatScreen(
                             vm = vm,
                             onOpenSettings = { screen = Screen.Settings },
-                            onOpenVoice = { screen = Screen.Conversation },
+                            onOpenVoice = { manualVoiceTap = true; screen = Screen.Conversation },
                             onOpenHistory = { screen = Screen.History },
                         )
                     }
@@ -152,9 +167,16 @@ class MainActivity : ComponentActivity() {
                         val leave = { if (locked) finish() else screen = Screen.Chat }
                         BackHandler { leave() }
                         val cvm: ConversationViewModel = viewModel()
+                        val fromWake = wakeEpoch != consumedWakeEpoch
+                        val autoListen = fromWake || manualVoiceTap
+                        SideEffect {
+                            consumedWakeEpoch = wakeEpoch
+                            manualVoiceTap = false
+                        }
                         ConversationScreen(
                             vm = cvm,
-                            assistTrigger = assistEpoch,
+                            wakeTrigger = wakeEpoch,
+                            autoListen = autoListen,
                             onRequestUnlock = { done -> requestUnlock(done) },
                             onExit = { leave() },
                         )
@@ -191,6 +213,7 @@ class MainActivity : ComponentActivity() {
         openRequestedConversation(intent)
         if (isAssistIntent(intent)) {
             assistEpoch++
+            if (intent.getBooleanExtra(EXTRA_FROM_ASSIST, false)) wakeEpoch++
             showOverLockScreen()
         }
     }

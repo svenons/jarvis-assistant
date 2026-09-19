@@ -64,7 +64,12 @@ import androidx.lifecycle.LifecycleEventObserver
 @Composable
 fun ConversationScreen(
     vm: ConversationViewModel,
-    assistTrigger: Int,
+    /** Bumped only by a genuine wake-word detection; drives re-listening while this screen is already open. */
+    wakeTrigger: Int,
+    /** Whether this particular entry to the screen should start listening on its own (wake word or an explicit
+     * mic tap) rather than landing on Idle and waiting for a tap — avoids "butt dials" from a bare app open or
+     * assist gesture. */
+    autoListen: Boolean,
     /** Show the system unlock prompt (fingerprint / PIN); calls back with whether the phone got unlocked. */
     onRequestUnlock: ((Boolean) -> Unit) -> Unit,
     onExit: () -> Unit,
@@ -102,16 +107,18 @@ fun ConversationScreen(
 
     LaunchedEffect(Unit) {
         vm.resetView()
-        if (!hasPermission) {
-            permLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else {
-            vm.startListening()
+        if (autoListen) {
+            if (!hasPermission) {
+                permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                vm.startListening()
+            }
         }
     }
-    var lastTrigger by remember { mutableStateOf(assistTrigger) }
-    LaunchedEffect(assistTrigger) {
-        if (assistTrigger != lastTrigger) {
-            lastTrigger = assistTrigger
+    var lastTrigger by remember { mutableStateOf(wakeTrigger) }
+    LaunchedEffect(wakeTrigger) {
+        if (wakeTrigger != lastTrigger) {
+            lastTrigger = wakeTrigger
             if (hasPermission && state == ConvState.Idle) {
                 vm.startListening(fromWake = true)
             }
