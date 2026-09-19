@@ -128,6 +128,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var modelMenu by remember { mutableStateOf(false) }
     var provider by remember { mutableStateOf("") }
     var thinking by remember { mutableStateOf("") }
+    var useRuns by remember { mutableStateOf(true) }
+    var deliverTarget by remember { mutableStateOf(SettingsStore.DEFAULT_DELIVER_TARGET) }
     var thinkingMenu by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf("") }
     var savedName by remember { mutableStateOf("") } // last name the wake service was told about
@@ -208,6 +210,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         store.updateConnection(baseUrl, apiKey, model, provider)
         store.updateVoice(elevenKey, elevenVoice)
         store.updateVoicePrompt(voicePrompt)
+        store.updateDeliverTarget(deliverTarget)
         store.updateLockedPrompt(lockedPrompt)
         store.updateWakeCustomName(wakeCustomName)
         store.updateAssistantName(assistantName)
@@ -289,6 +292,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         showReasoning = s.showReasoning
         voicePrompt = s.voicePrompt
         thinking = s.thinking
+        useRuns = s.useRuns
+        deliverTarget = s.deliverTarget
         lockedGuard = s.lockedGuard
         lockedPrompt = s.lockedPrompt
         elevenKey = s.elevenKey
@@ -540,6 +545,56 @@ fun SettingsScreen(onBack: () -> Unit) {
                     fontSize = 12.sp,
                     color = JarvisColors.Muted,
                 )
+
+                OutlinedTextField(
+                    value = deliverTarget,
+                    onValueChange = { deliverTarget = it },
+                    label = { Text("Send background tasks to") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = textFieldColors,
+                )
+                Text(
+                    "The chat\u2019s \u201C\u2192\u201D button hands a task to Hermes, which finishes it on your server and sends the " +
+                        "answer to this channel: telegram, discord, slack, signal, email\u2026 or all. It is that platform\u2019s " +
+                        "home channel, so it must be set on the server first (send /sethome in that chat).",
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Keep working when I leave",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "Send each message as a Hermes run, so it carries on if you close the app, and the answer is " +
+                                "added to the conversation (with a notification). Only Stop or Cancel ends it. Off: Hermes " +
+                                "cancels a reply the moment the app disconnects. Older servers without runs fall back to that.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = useRuns,
+                        onCheckedChange = {
+                            useRuns = it
+                            scope.launch { store.updateUseRuns(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
 
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.weight(1f)) {

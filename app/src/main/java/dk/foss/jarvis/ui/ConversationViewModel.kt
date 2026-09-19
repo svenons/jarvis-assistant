@@ -11,8 +11,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dk.foss.jarvis.data.ConversationRepository
 import dk.foss.jarvis.data.JarvisSettings
+import dk.foss.jarvis.data.PendingRun
 import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
+import dk.foss.jarvis.run.RunWatcher
 import dk.foss.jarvis.voice.AndroidTts
 import dk.foss.jarvis.voice.ElevenLabsTts
 import dk.foss.jarvis.voice.LocalRecognizer
@@ -25,7 +27,6 @@ import dk.foss.jarvis.voice.VoiceRecognizer
 import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import okhttp3.sse.EventSource
 
 enum class ConvState { Idle, Listening, Thinking, Speaking }
 
@@ -77,7 +78,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var tts: TtsEngine? = null
     private var androidFallback: AndroidTts? = null
     private var builtTtsChoice: String? = null // which voice `tts` was built for
-    private var source: EventSource? = null
+    private var turnHandle: HermesClient.TurnHandle? = null
+    private val watcher = RunWatcher.get(app)
+    private var gotReplyText = false // some reply text was shown this turn (else the run's final output is)
     private var continuous = true
 
     // --- streaming-TTS pipeline ---
@@ -163,6 +166,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 state.value = ConvState.Idle
                 return@launch
             }
+            if (repo.pendingRun != null && turnHandle == null) {
+                // An earlier request is still running with nobody listening; a new one would only queue behind it.
+                hint.value = "Hermes is still working on your last request in the background."
+                state.value = ConvState.Idle
+                return@launch
+            }
             if (freshConversation) {
                 freshConversation = false
                 repo.persist() // keep the earlier conversation in History, then start clean
@@ -180,6 +189,38 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         repo.persistAsync() // a no-op when nothing changed since the last save
     }
 
+    /** A new turn starts while the previous one is still running (you interrupted it): that really cancels it. */
+    private fun stopTurn() {
+        val h = turnHandle ?: return
+        turnHandle = null
+        val runId = repo.pendingRun?.runId
+        h.stop()
+        if (runId != null) {
+            watcher.stop(runId)
+            repo.updatePendingRun(null)
+        }
+    }
+
+    /**
+     * Stop listening (screen closed, app left). A run keeps going on the server: [RunWatcher] collects its answer
+     * into the conversation and notifies. On the old chat-stream fallback this simply ends the stream.
+     */
+    private fun leaveTurn() {
+        val h = turnHandle ?: return
+        turnHandle = null
+        assistantIndex = -1
+        h.detach()
+        repo.pendingRun?.runId?.let { watcher.detach(it) }
+        repo.persistAsync()
+    }
+
+    /** The run ended while we were listening, so its answer is already in the conversation. */
+    private fun endRun() {
+        turnHandle = null
+        repo.pendingRun?.runId?.let { watcher.finish(it) }
+        repo.updatePendingRun(null)
+    }
+
     /** Start a fresh turn: invalidate in-flight callbacks and clear pipeline state. */
     private fun beginTurn() {
         endReply() // a reply still streaming from the previous turn is kept, not dropped
@@ -192,7 +233,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         // Stop any in-flight recognition so the next start isn't blocked by
         // AudioCapture's "if (active) return" guard (which silently drops it).
         runCatching { recognizer?.stop() }
-        source?.cancel(); source = null
+        stopTurn() // interrupting a turn that is still running cancels it
         runCatching { tts?.stop(); androidFallback?.stop() }
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
@@ -223,7 +264,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         emptyWakeTurns = 0
         currentTurnFromWake = false
         runCatching { recognizer?.stop() }
-        source?.cancel(); source = null
+        leaveTurn()
         transcript.value = ""
         reply.value = ""
         error.value = null
@@ -282,6 +323,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         working.value = true
         main.postDelayed(stallIndicator, STALL_MS)
         assistantIndex = -1
+        gotReplyText = false
         unlockFilter = MarkerFilter(UNLOCK_MARKER)
         unlockNeeded = false
         repo.addMessage("user", userText)
@@ -291,12 +333,38 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
         val s = settings ?: return
         val client = HermesClient(s.baseUrl, s.apiKey)
-        source = client.streamChat(requestHistory, s.model, s.provider, repo.sessionId, object : HermesClient.StreamCallbacks {
+        val convId = repo.activeConversationId
+        val request = HermesClient.TurnRequest(
+            requestHistory, s.model, s.provider, repo.sessionId, systemPromptFor(s), s.thinking, s.useRuns,
+        )
+        turnHandle = client.sendTurn(request, object : HermesClient.StreamCallbacks {
             override fun onDelta(textDelta: String) = onMain {
+                if (turn == myTurn) showReply(textDelta)
+            }
+
+            override fun onRunStarted(runId: String) = onMain {
+                // Not turn-guarded: even if we left meanwhile, the run exists and its result must be collected.
+                if (repo.activeConversationId != convId) return@onMain
+                val run = PendingRun(runId, System.currentTimeMillis())
+                repo.updatePendingRun(run)
+                repo.persistAsync()
+                watcher.begin(convId, runId, run.startedAt)
+                if (turn != myTurn || turnHandle == null) watcher.detach(runId)
+            }
+
+            override fun onFinalOutput(text: String) = onMain {
+                // Normally the text streamed already; show the final answer only if nothing did.
+                if (turn == myTurn && !gotReplyText && text.isNotBlank()) showReply(text)
+            }
+
+            override fun onStreamLost(message: String) = onMain {
                 if (turn != myTurn) return@onMain
-                val visible = unlockFilter.feed(textDelta)
-                if (unlockFilter.found) unlockNeeded = true
-                if (visible.isNotEmpty()) onTextDelta(visible)
+                // The connection dropped but the run goes on: the watcher collects it instead of failing the turn.
+                turnHandle = null
+                repo.pendingRun?.runId?.let { watcher.detach(it) }
+                beginTurn() // stops speech and clears the pipeline
+                hint.value = "Lost the connection. Hermes is still working; the answer will be added to the conversation."
+                goIdle()
             }
 
             override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
@@ -334,6 +402,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     val turnEnd = repo.messages.size
                     viewModelScope.launch { TurnEnricher.addDetails(client, repo, turnStart, turnEnd) }
                 }
+                endRun()
                 streamDone = true
                 if (tts is QueuedTts) finishIfSpoken() else pump()
             }
@@ -344,10 +413,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 working.value = false
                 stalled.value = false
                 error.value = message
+                endRun()
                 endReply() // keep any partial reply that arrived before the failure
                 goIdle()
             }
-        }, systemPrompt = systemPromptFor(s), reasoningEffort = s.thinking)
+        })
     }
 
     private fun isPhoneLocked(): Boolean =
@@ -365,6 +435,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         return listOfNotNull(s.voiceInstructions, lockedText)
             .joinToString("\n\n")
             .ifBlank { null }
+    }
+
+    /** Reply text arrived (streamed, or a run's final answer): hide an unlock marker, then show and speak the rest. */
+    private fun showReply(text: String) {
+        val visible = unlockFilter.feed(text)
+        if (unlockFilter.found) unlockNeeded = true
+        if (visible.isNotEmpty()) {
+            gotReplyText = true
+            onTextDelta(visible)
+        }
     }
 
     /** A token arrived: show it, and speak as soon as a full sentence is available. */
@@ -597,7 +677,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         recognizer?.release()
         recognizer = null
         runCatching { tts?.stop(); androidFallback?.stop() }
-        source?.cancel(); source = null
+        leaveTurn() // leaving the screen doesn't kill a turn that is already running
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
         speaking = false
@@ -622,7 +702,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         main.removeCallbacks(stallIndicator)
         main.removeCallbacks(rearmWake)
         recognizer?.release()
-        source?.cancel()
+        leaveTurn()
         tts?.shutdown()
         androidFallback?.shutdown()
         repo.persistAsync()

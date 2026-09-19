@@ -38,6 +38,14 @@ class ConversationStore(context: Context) {
         Unit
     }
 
+    /** Conversations with a run still going: (conversation id, run). Read at startup to resume collecting them. */
+    suspend fun pendingRuns(): List<Pair<String, PendingRun>> = withContext(Dispatchers.IO) {
+        (dir.listFiles { f -> f.extension == "json" } ?: emptyArray()).mapNotNull { f ->
+            runCatching { json.decodeFromString(Conversation.serializer(), f.readText()) }.getOrNull()
+                ?.pendingRun?.let { f.nameWithoutExtension to it }
+        }
+    }
+
     /** All conversations as lightweight metadata, newest first. */
     suspend fun list(): List<ConversationMeta> = withContext(Dispatchers.IO) {
         (dir.listFiles { f -> f.extension == "json" } ?: emptyArray())

@@ -1,13 +1,17 @@
 package dk.foss.jarvis.data
 
 import android.content.Context
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import dk.foss.jarvis.hermes.ChatMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
@@ -30,7 +34,12 @@ class ConversationRepository private constructor(private val store: Conversation
     @Volatile var sessionId: String? = null
         private set
 
+    /** A turn Hermes is still working on for the active conversation (drives the "working in the background" banner). */
+    var pendingRun: PendingRun? by mutableStateOf(null)
+        private set
+
     private var activeId: String = UUID.randomUUID().toString()
+    val activeConversationId: String get() = activeId
     private var title: String = ""
     private var createdAt: Long = System.currentTimeMillis()
 
@@ -47,6 +56,7 @@ class ConversationRepository private constructor(private val store: Conversation
         activeId = UUID.randomUUID().toString()
         messages.clear()
         sessionId = null
+        pendingRun = null
         title = ""
         createdAt = System.currentTimeMillis()
         markClean()
@@ -58,10 +68,15 @@ class ConversationRepository private constructor(private val store: Conversation
         title = c.title
         createdAt = c.createdAt
         sessionId = c.sessionId
+        pendingRun = c.pendingRun
         messages.clear()
         // Replies saved before streamReply existed start with a blank line: clean them as they load.
         messages.addAll(c.messages.map { UiMessage(it.role, if (it.role == "assistant") it.text.trimStart() else it.text) })
         markClean()
+    }
+
+    fun updatePendingRun(run: PendingRun?) {
+        if (pendingRun != run) { pendingRun = run; markChanged() }
     }
 
     fun setSessionId(id: String) {
@@ -133,7 +148,7 @@ class ConversationRepository private constructor(private val store: Conversation
     suspend fun persist() = saveLock.withLock {
         val v = version.get()
         if (v == savedVersion) return@withLock
-        if (messages.none { !it.isError }) return@withLock
+        if (messages.none { !it.isError } && pendingRun == null) return@withLock
         val saved = store.save(
             Conversation(
                 id = activeId,
@@ -142,6 +157,7 @@ class ConversationRepository private constructor(private val store: Conversation
                 updatedAt = System.currentTimeMillis(),
                 sessionId = sessionId,
                 messages = messages.filter { !it.isError }.map { StoredMessage(it.role, it.text) },
+                pendingRun = pendingRun,
             ),
         )
         if (saved && v > savedVersion) savedVersion = v
@@ -150,6 +166,66 @@ class ConversationRepository private constructor(private val store: Conversation
     /** Fire-and-forget save on the app-lifetime scope (safe to call at teardown). */
     fun persistAsync() {
         ioScope.launch { persist() }
+    }
+
+    /**
+     * A run that was left running has ended: write its result into [conversationId] (the active conversation, or a
+     * saved one) and clear the pending marker. Returns the text to notify with, or null if the run was not pending
+     * there any more (someone else already collected it).
+     */
+    suspend fun completeRun(conversationId: String, runId: String, outcome: RunOutcome): String? {
+        if (conversationId == activeId) {
+            if (pendingRun?.runId != runId) return null
+            withContext(Dispatchers.Main) {
+                when (outcome) {
+                    is RunOutcome.Completed -> settleReply(outcome.output)
+                    is RunOutcome.Failed -> addMessage("assistant", "\u26A0\uFE0F ${outcome.error}", isError = true)
+                    RunOutcome.Cancelled -> Unit // whatever streamed before the stop stays
+                }
+                updatePendingRun(null)
+            }
+            persist()
+            return summary(outcome)
+        }
+        return saveLock.withLock {
+            val c = store.load(conversationId) ?: return@withLock null
+            if (c.pendingRun?.runId != runId) return@withLock null
+            val msgs = if (outcome is RunOutcome.Completed) settle(c.messages, outcome.output) else c.messages
+            store.save(c.copy(messages = msgs, pendingRun = null, updatedAt = System.currentTimeMillis()))
+            summary(outcome)
+        }
+    }
+
+    private fun summary(o: RunOutcome): String = when (o) {
+        is RunOutcome.Completed -> o.output.trim()
+        is RunOutcome.Failed -> "Failed: ${o.error}"
+        RunOutcome.Cancelled -> "Cancelled"
+    }
+
+    /** The final answer replaces the partial reply that was streaming when the app left, or is added if none was. */
+    private fun settleReply(output: String) {
+        val text = output.trim()
+        if (text.isEmpty()) return
+        val last = messages.lastOrNull()
+        val lastUser = messages.indexOfLast { it.role == "user" }
+        if (last != null && last.role == "assistant" && !last.isError && messages.lastIndex > lastUser) {
+            messages[messages.lastIndex] = last.copy(text = text)
+            markChanged()
+        } else {
+            addMessage("assistant", text)
+        }
+    }
+
+    private fun settle(stored: List<StoredMessage>, output: String): List<StoredMessage> {
+        val text = output.trim()
+        if (text.isEmpty()) return stored
+        val last = stored.lastOrNull()
+        val lastUser = stored.indexOfLast { it.role == "user" }
+        return if (last != null && last.role == "assistant" && stored.lastIndex > lastUser) {
+            stored.dropLast(1) + StoredMessage("assistant", text)
+        } else {
+            stored + StoredMessage("assistant", text)
+        }
     }
 
     suspend fun list(): List<ConversationMeta> = store.list()

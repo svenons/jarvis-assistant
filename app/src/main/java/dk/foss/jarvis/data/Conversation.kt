@@ -27,6 +27,20 @@ data class UiMessage(
 @Serializable
 data class StoredMessage(val role: String, val text: String)
 
+/**
+ * A turn Hermes is still working on. Saved with the conversation, so the result can be collected even if the app was
+ * closed or killed meanwhile.
+ */
+@Serializable
+data class PendingRun(val runId: String, val startedAt: Long)
+
+/** How a run that was left running ended. */
+sealed interface RunOutcome {
+    data class Completed(val output: String) : RunOutcome
+    data class Failed(val error: String) : RunOutcome
+    data object Cancelled : RunOutcome
+}
+
 /** A full saved conversation. */
 @Serializable
 data class Conversation(
@@ -36,6 +50,7 @@ data class Conversation(
     val updatedAt: Long,
     val sessionId: String? = null, // Hermes X-Hermes-Session-Id, for server-side continuity
     val messages: List<StoredMessage> = emptyList(),
+    val pendingRun: PendingRun? = null,
 )
 
 /** Lightweight entry for the history list. */

@@ -23,7 +23,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.activity.result.contract.ActivityResultContracts
+import dk.foss.jarvis.data.ConversationRepository
 import dk.foss.jarvis.data.SettingsStore
+import dk.foss.jarvis.run.RunWatcher
 import dk.foss.jarvis.ui.Branding
 import dk.foss.jarvis.ui.ChatScreen
 import dk.foss.jarvis.ui.ChatViewModel
@@ -60,6 +63,29 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context, intent: Intent) = refreshLocked()
     }
 
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* denied = no "done" notifications */ }
+
+    /** Ask once for permission to post the "finished" notification of a task left running in the background. */
+    private fun askForNotificationsOnce() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("jarvis_prompts", MODE_PRIVATE)
+        if (prefs.getBoolean("asked_notifications", false)) return
+        prefs.edit().putBoolean("asked_notifications", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /** Tapping a "finished" notification opens that conversation, unless a turn is in progress in the current one. */
+    private fun openRequestedConversation(i: Intent?) {
+        val id = i?.getStringExtra(EXTRA_OPEN_CONVERSATION) ?: return
+        i.removeExtra(EXTRA_OPEN_CONVERSATION)
+        if (locked) return
+        val repo = ConversationRepository.get(this)
+        if (repo.pendingRun != null || repo.activeConversationId == id) return
+        lifecycleScope.launch { repo.open(id) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Keep the screen awake while the assistant is in the foreground.
@@ -79,6 +105,8 @@ class MainActivity : ComponentActivity() {
             showOverLockScreen()
         }
         refreshLocked()
+        if (savedInstanceState == null) openRequestedConversation(intent)
+        askForNotificationsOnce()
         lifecycleScope.launch {
             SettingsStore(this@MainActivity).settings.collect { wakeInBackground = it.wakeBackground }
         }
@@ -160,6 +188,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         refreshLocked()
         setIntent(intent)
+        openRequestedConversation(intent)
         if (isAssistIntent(intent)) {
             assistEpoch++
             showOverLockScreen()
@@ -201,11 +230,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        RunWatcher.get(this).apply {
+            appVisible = true
+            resumeStored() // results of turns left running while the app was closed or killed
+        }
         rearmWakeWord()
     }
 
     override fun onStop() {
         super.onStop()
+        RunWatcher.get(this).appVisible = false
         // "Only while the app is open": stop listening when it leaves the screen (not on a rotation).
         if (!wakeInBackground && !isChangingConfigurations) WakeWordService.stop(this)
     }
@@ -227,5 +261,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_FROM_ASSIST = "from_assist"
+        const val EXTRA_OPEN_CONVERSATION = "open_conversation"
     }
 }

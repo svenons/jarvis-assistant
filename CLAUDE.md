@@ -93,7 +93,8 @@ mechanism behind an interface.
 
 | Layer | File(s) | Role |
 |---|---|---|
-| Wire protocol | `hermes/HermesClient.kt`, `hermes/Models.kt` | **Only** Hermes coupling. OkHttp SSE → `/v1/chat/completions`; `/v1/models` for the connection test. |
+| Wire protocol | `hermes/HermesClient.kt`, `hermes/Models.kt` | **Only** Hermes coupling. A turn is `sendTurn()`: `POST /v1/runs` + SSE from `/v1/runs/{id}/events` (falls back to `/v1/chat/completions` on servers without runs); `fetchRun` / `stopRun`; `/v1/models` for the connection test. |
+| Background runs | `run/RunWatcher.kt`, `run/RunService.kt`, `data/ConversationRepository.completeRun` | Collects the result of a turn nobody is listening to: polls the run, writes the answer into the conversation, saves, notifies. Foreground service only while runs exist. |
 | Shared HTTP | `net/Http.kt` | `Http.base` (bounded timeouts) + `Http.streaming` (`readTimeout(0)` for SSE, derived from `base`). Reuse these — never build a new `OkHttpClient`. |
 | Persistence | `data/SettingsStore.kt` (DataStore prefs), `data/ConversationStore.kt` (one JSON file per conversation), `data/ConversationRepository.kt` (singleton source of truth) | Settings = DataStore; conversations = `filesDir/conversations/<id>.json`. Don't mix. |
 | STT | `voice/VoiceRecognizer.kt` (interface), `voice/SpeechInput.kt` (on-device), `voice/ScribeRecognizer.kt` + `voice/AudioCapture.kt` + `voice/ElevenLabsStt.kt` (ElevenLabs), `voice/LocalRecognizer.kt` + `voice/LocalSttModel.kt` (fully on-device, sherpa-onnx; catalog of tiny → large models, see below) | Three backends behind one interface. |
@@ -334,8 +335,45 @@ screens add `BackHandler { screen = Chat }`.
   parser (the API is undocumented: every field is a `JsonElement`).
 - **Replies never start with a blank line.** Hermes opens replies with newlines; `ConversationRepository.streamReply`
   creates the reply on its first visible text and both view models use it. Saved conversations are trimmed on load.
-- **Hermes approval requests are not integrated.** Approvals exist only on `/v1/runs` (`approval.request` event,
-  resolved with `POST /v1/runs/{id}/approval`); the app talks to `/v1/chat/completions`, which exposes neither.
+- **Turns are runs, so leaving the app does not cancel them.** `/v1/chat/completions` is cancelled by Hermes the
+  moment the client disconnects (`_abandon_agent_task` hard-interrupts the agent); a run (`POST /v1/runs`) is its own
+  server task that outlives its event stream. `HermesClient.sendTurn` returns a `TurnHandle`: `detach()` stops
+  listening (the run goes on), `stop()` is the only real cancel (`POST /v1/runs/{id}/stop`). Rules the view models
+  follow: leaving (`stopAll`, `resetView`, `onCleared`, screen closed, app backgrounded or swiped away) = detach;
+  Stop / Cancel / interrupting a voice turn with a mic tap = stop. `Settings → Keep working when I leave`
+  (`useRuns`, default on) turns this off; a server answering 404/405/501 to `/v1/runs` falls back to the chat stream
+  automatically, where a turn can't outlive the app and there is no `PendingRun`.
+- **A run in flight is saved with the conversation** (`Conversation.pendingRun`, default null for old files), set in
+  `onRunStarted` and cleared when the run ends or is cancelled. `RunWatcher` owns polling for detached runs (2 s, then
+  5 s, then 15 s); the UI owns the result while it is listening (`begin` → `finish`, or `detach`). `resumeStored()` (called
+  from `MainActivity.onStart` and when `RunService` is restarted after a process kill) re-adopts saved pending runs.
+  `completeRun` writes into the active conversation or a saved one, replacing the partial reply that was streaming when
+  the app left. Chat blocks a new message while a run is pending (a second turn would only queue on the session).
+- **Runs API facts (verified in Hermes source/docs, not on a live server):** create returns `202 {run_id}`; with a
+  `session_id` and no `conversation_history` Hermes loads that session's transcript, so the app sends only `input`
+  (and `conversation_history` only for a session Hermes hasn't seen); the client makes up the session id for a new
+  conversation. Events: `message.delta {delta}`, `tool.started {tool,preview}` / `tool.completed` (no tool id: paired
+  first-in-first-out per tool name), `approval.request`, `run.completed {output}`, `run.failed {error}`,
+  `run.cancelled` / `run.interrupted`. There is **no event replay** after a reconnect and finished runs are forgotten
+  after a short TTL, so a run that outlives its stream is collected by `GET /v1/runs/{id}`; if Hermes already forgot
+  it, `RunWatcher` recovers the reply from the session transcript (`latestReply`). A stream that ends without a
+  terminal event is `onStreamLost`, never a finished turn.
+- **Approvals are always denied.** A run pauses on `approval.request` until answered. Jarvis never approves for the
+  user: the client immediately posts `{"choice":"deny","resolve_all":true}` to `/v1/runs/{id}/approval` and shows a
+  "Denied, needs your approval" tool line, so a run can't hang. This is new with runs: the chat stream never paused.
+- **The chat's "→ Telegram" button hands a task to Hermes's Jobs API, not to a run.** A run can't message a channel (the
+  API-server toolset has no `send_message`), but a cron job can: `HermesClient.createBackgroundJob` does
+  `POST /api/jobs {name, prompt, schedule:"in 1m", deliver, repeat:1}` then `POST /api/jobs/{id}/run` (documented "run now":
+  it fires at the next scheduler tick, which is every 60 s). `deliver` is `Settings → Send background tasks to`
+  (`deliverTarget`, default `telegram`): a platform's **home channel** (`/sethome` on the server) or `all`; without `deliver`
+  Hermes only saves the output to a file. Facts from the Hermes source: the create body needs `name`, `schedule`, `prompt`
+  (≤ 5000 chars, injection-scanned: a 400 carries the reason, which the app shows); `reasoning_effort` is **not** accepted
+  on create, so the Thinking setting doesn't apply; a job runs in a **fresh session with no chat context**, so
+  `ChatViewModel.backgroundPrompt` puts the last few messages in the prompt (older context is cut first); the answer is
+  **not** added to the chat, only a "Sent as a background task" note (a tool-role message, never sent to Hermes). Known gaps:
+  Hermes validates `deliver` only when the job fires, so a platform with no home channel is accepted and then fails on
+  the server as `last_status = delivery_failed`, which the app does not see; and finished one-shot jobs stay in the job list
+  as `completed` (clean up server-side with `hermes cron remove`).
 - **Voice turns send a `system` message.** `JarvisSettings.voiceInstructions` (toggle + editable text,
   default `SettingsStore.DEFAULT_VOICE_PROMPT`) is passed as `streamChat(systemPrompt = …)` from
   `ConversationViewModel` only — text chat is unaffected. Hermes layers a request `system` message on top of
@@ -393,7 +431,8 @@ screens add `BackHandler { screen = Chat }`.
   (`KeyguardManager.requestDismissKeyguard`: the system fingerprint/PIN prompt); on success `continueAfterUnlock`
   sends "I've unlocked the phone…" as a normal user turn so Hermes carries on, and on cancel the screen goes idle
   (never auto-starts the mic). `ConversationScreen` skips `stopAll` on `ON_STOP` while `unlockInFlight`. A `LOCKED` tag shows.
-- **`ConversationScreen` calls `vm.stopAll()` in both `ON_STOP` and `onDispose`**,
+- **`ConversationScreen` calls `vm.stopAll()` in both `ON_STOP` and `onDispose`** (which now *detaches* a running
+  turn instead of cancelling it, and skips `ON_STOP` while an unlock prompt is up),
   and `vm.resetView()` in `LaunchedEffect(Unit)` (the VM is retained but the shared
   repo conversation may have been replaced — resetView avoids showing a stale
   exchange).

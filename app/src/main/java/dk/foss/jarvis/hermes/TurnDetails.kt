@@ -21,11 +21,7 @@ data class TurnDetails(val reasoning: String, val toolCalls: List<StoredToolCall
  */
 fun turnDetails(messages: List<SessionMessage>): TurnDetails? {
     if (messages.isEmpty()) return null
-    val ordered = when {
-        messages.all { number(it.timestamp) != null } -> messages.sortedBy { number(it.timestamp) }
-        messages.all { number(it.id) != null } -> messages.sortedBy { number(it.id) }
-        else -> messages
-    }
+    val ordered = inOrder(messages)
     val lastUser = ordered.indexOfLast { it.role == "user" }
     if (lastUser < 0) return null
     val assistant = ordered.drop(lastUser + 1).filter { it.role == "assistant" }
@@ -37,6 +33,24 @@ fun turnDetails(messages: List<SessionMessage>): TurnDetails? {
         .distinct()
         .joinToString("\n\n")
     return TurnDetails(reasoning, assistant.flatMap { toolCalls(it.tool_calls) })
+}
+
+private fun inOrder(messages: List<SessionMessage>): List<SessionMessage> = when {
+    messages.all { number(it.timestamp) != null } -> messages.sortedBy { number(it.timestamp) }
+    messages.all { number(it.id) != null } -> messages.sortedBy { number(it.id) }
+    else -> messages
+}
+
+/**
+ * The text of the latest turn's final assistant message (what a finished run answered), or null. Used to recover a
+ * result when Hermes has already forgotten the run itself but still has the session transcript.
+ */
+fun latestReply(messages: List<SessionMessage>): String? {
+    val ordered = inOrder(messages)
+    val lastUser = ordered.indexOfLast { it.role == "user" }
+    if (lastUser < 0) return null
+    return ordered.drop(lastUser + 1).lastOrNull { it.role == "assistant" && !text(it.content).isNullOrBlank() }
+        ?.let { text(it.content) }
 }
 
 private fun number(e: JsonElement?): Double? = (e as? JsonPrimitive)?.doubleOrNull

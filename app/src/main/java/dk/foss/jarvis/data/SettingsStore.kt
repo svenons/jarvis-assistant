@@ -39,6 +39,13 @@ data class JarvisSettings(
     val voiceBrief: Boolean = true,
     /** After each turn, fetch Hermes's stored reasoning and tool calls and add them to history. */
     val showReasoning: Boolean = true,
+    /** Where a task sent "in the background" delivers its answer: a Hermes home channel (`telegram`, `discord`, ...) or `all`. */
+    val deliverTarget: String = SettingsStore.DEFAULT_DELIVER_TARGET,
+    /**
+     * Send each turn as a Hermes run, so it keeps going on the server when the app is left and only Cancel stops it.
+     * Off = the plain chat stream, which Hermes cancels as soon as the app disconnects.
+     */
+    val useRuns: Boolean = true,
     /** How hard Hermes thinks on every request (see [SettingsStore.THINKING_LEVELS]); blank = Hermes's own setting. */
     val thinking: String = "",
     /** Custom wording for that request; blank means [SettingsStore.DEFAULT_VOICE_PROMPT]. */
@@ -86,6 +93,8 @@ class SettingsStore(private val context: Context) {
         val VOICE_BRIEF = booleanPreferencesKey("voice_brief")
         val SHOW_REASONING = booleanPreferencesKey("show_reasoning")
         val VOICE_PROMPT = stringPreferencesKey("voice_prompt")
+        val DELIVER_TARGET = stringPreferencesKey("deliver_target")
+        val USE_RUNS = booleanPreferencesKey("use_runs")
         val THINKING = stringPreferencesKey("thinking")
         val LOCKED_GUARD = booleanPreferencesKey("locked_guard")
         val LOCKED_PROMPT = stringPreferencesKey("locked_prompt")
@@ -116,6 +125,8 @@ class SettingsStore(private val context: Context) {
             voiceBrief = p[Keys.VOICE_BRIEF] ?: true,
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
+            deliverTarget = (p[Keys.DELIVER_TARGET] ?: "").ifBlank { DEFAULT_DELIVER_TARGET },
+            useRuns = p[Keys.USE_RUNS] ?: true,
             thinking = (p[Keys.THINKING] ?: "").takeIf { v -> THINKING_LEVELS.any { it.first == v } } ?: "",
             lockedGuard = p[Keys.LOCKED_GUARD] ?: true,
             lockedPrompt = p[Keys.LOCKED_PROMPT] ?: "",
@@ -178,6 +189,14 @@ class SettingsStore(private val context: Context) {
         context.dataStore.edit { p -> p[Keys.VOICE_PROMPT] = prompt.trim() }
     }
 
+    suspend fun updateDeliverTarget(target: String) {
+        context.dataStore.edit { p -> p[Keys.DELIVER_TARGET] = target.trim().lowercase().ifEmpty { DEFAULT_DELIVER_TARGET } }
+    }
+
+    suspend fun updateUseRuns(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.USE_RUNS] = enabled }
+    }
+
     suspend fun updateThinking(level: String) {
         context.dataStore.edit { p -> p[Keys.THINKING] = level }
     }
@@ -211,6 +230,7 @@ class SettingsStore(private val context: Context) {
         const val DEFAULT_MODEL = "hermes-agent"
         const val LEGACY_MODEL = "kimi-for-coding" // prior default; migrated to DEFAULT_MODEL
         const val DEFAULT_ELEVEN_VOICE = "JBFqnCBsd6RMkjVDRZzb"
+        const val DEFAULT_DELIVER_TARGET = "telegram"
 
         /** Thinking levels Hermes accepts as `reasoning_effort` (value, label); the blank value leaves it to Hermes. */
         val THINKING_LEVELS = listOf(
