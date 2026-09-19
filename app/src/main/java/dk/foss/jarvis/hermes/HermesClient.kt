@@ -1,5 +1,6 @@
 package dk.foss.jarvis.hermes
 
+import dk.foss.jarvis.data.CloudflareAccessConfig
 import dk.foss.jarvis.net.Http
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -11,7 +12,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -33,13 +37,52 @@ import java.util.concurrent.atomic.AtomicInteger
  * fall back to OpenAI-compatible `/v1/chat/completions`, which Hermes cancels the moment the client disconnects.
  * Also `/v1/models` for a connection test. Bearer auth; session continuity via `session_id` (runs) or
  * X-Hermes-Session-Id (chat completions).
+ *
+ * [cloudflareAccess] is an optional OUTER layer in front of all of that: when enabled and configured, every
+ * request this client makes (chat/runs streams included — the header rides on the SSE handshake request, and
+ * this app has no WebSocket traffic to Hermes) carries `CF-Access-Client-Id`/`CF-Access-Client-Secret` for a
+ * Hermes exposed through a Cloudflare Tunnel behind Cloudflare Access. See [cloudflareInterceptor].
  */
 class HermesClient(
     private val baseUrl: String,
     private val apiKey: String,
+    private val cloudflareAccess: CloudflareAccessConfig = CloudflareAccessConfig(),
 ) {
     // explicitNulls=false: an unset `provider` must be omitted from the request, not sent as null.
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
+
+    // Resolved once per client (baseUrl doesn't change during its lifetime, and a fresh HermesClient is built
+    // per request anyway). Null for a blank/invalid baseUrl — the interceptor below then never matches, so it
+    // adds no headers rather than guessing a host.
+    private val hermesHost: String? = baseUrl.toHttpUrlOrNull()?.host
+
+    /**
+     * Adds the Cloudflare Access Service Token headers to requests going to the configured Hermes host, and only
+     * that host — never ElevenLabs or anything else sharing [Http]'s connection pools. Applied by deriving [http]/
+     * [httpStreaming] from the shared [Http] clients below, which is why every request in this file goes through
+     * one of those two instead of [Http.base]/[Http.streaming] directly.
+     */
+    private val cloudflareInterceptor = Interceptor { chain ->
+        val request = chain.request()
+        val cf = cloudflareAccess
+        val addCfHeaders = cf.enabled && cf.isValid && hermesHost != null && request.url.host == hermesHost
+        chain.proceed(
+            if (addCfHeaders) {
+                request.newBuilder()
+                    .header("CF-Access-Client-Id", cf.clientId)
+                    .header("CF-Access-Client-Secret", cf.clientSecret)
+                    .build()
+            } else {
+                request
+            },
+        )
+    }
+
+    // newBuilder() shares the parent's connection pool/dispatcher — this doesn't spin up new threads or
+    // connections, it just layers the interceptor on top for calls made through this HermesClient instance.
+    private val http: OkHttpClient = Http.base.newBuilder().addInterceptor(cloudflareInterceptor).build()
+    private val httpStreaming: OkHttpClient = Http.streaming.newBuilder().addInterceptor(cloudflareInterceptor).build()
+    private val httpProbe: OkHttpClient = Http.probe.newBuilder().addInterceptor(cloudflareInterceptor).build()
 
     interface StreamCallbacks {
         fun onDelta(textDelta: String)
@@ -159,7 +202,7 @@ class HermesClient(
                 cb.onError(msg)
             }
         }
-        return EventSources.createFactory(Http.streaming).newEventSource(builder.build(), listener)
+        return EventSources.createFactory(httpStreaming).newEventSource(builder.build(), listener)
     }
 
     /**
@@ -176,7 +219,7 @@ class HermesClient(
                     .addHeader("Authorization", "Bearer $apiKey")
                     .get()
                     .build()
-                Http.base.newCall(req).execute().use { resp ->
+                http.newCall(req).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
                     json.decodeFromString(SessionMessagesResponse.serializer(), text).data
@@ -195,7 +238,7 @@ class HermesClient(
                 .addHeader("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
-            Http.base.newCall(req).execute().use { resp ->
+            http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
                 json.decodeFromString(ModelOptionsResponse.serializer(), text)
@@ -206,22 +249,40 @@ class HermesClient(
     /** GET /v1/models — returns model ids on success, or a failure with the reason. */
     suspend fun testConnection(): Result<List<String>> = fetchModels().map { models -> models.map { it.id } }
 
+    enum class Probe { Reachable, Unreachable, AccessBlocked }
+
     /**
-     * A quick "can we even reach Hermes" check, with a short timeout ([Http.probe]) so being off the right
+     * A quick "can we even reach Hermes" check, with a short timeout ([httpProbe]) so being off the right
      * network (e.g. away from home wifi with no tunnel set up) fails in a few seconds instead of only surfacing
      * after the mic has recorded, STT has transcribed, and the real request has waited out its full timeout.
-     * Any HTTP response — even an error one — counts as reachable; only a failed connection doesn't.
+     * Any HTTP response from Hermes — even an error one — counts as reachable; only a failed connection doesn't.
+     * Cloudflare Access's login page is a response too, but not from Hermes: it is [Probe.AccessBlocked].
      */
-    suspend fun isReachable(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun probe(): Probe = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
                 .url("$baseUrl/v1/models")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
-            Http.probe.newCall(req).execute().use { }
-            true
-        }.getOrDefault(false)
+            httpProbe.newCall(req).execute().use { resp ->
+                if (isAccessPage(resp)) Probe.AccessBlocked else Probe.Reachable
+            }
+        }.getOrDefault(Probe.Unreachable)
+    }
+
+    /**
+     * True if [resp] is Cloudflare Access turning the request away rather than an answer from Hermes: either the
+     * redirect to its login page (OkHttp follows it, so the final request is on a *.cloudflareaccess.com host), or
+     * the HTML 403 an Access app that only takes service tokens sends. A Hermes 401 that merely passed through
+     * Cloudflare is JSON, so it is not matched.
+     */
+    private fun isAccessPage(resp: Response): Boolean {
+        val host = resp.request.url.host
+        if (host != hermesHost && host.endsWith(".cloudflareaccess.com")) return true
+        return resp.code == 403 &&
+            resp.header("Server").equals("cloudflare", ignoreCase = true) &&
+            resp.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)
     }
 
     /**
@@ -235,10 +296,16 @@ class HermesClient(
                 .addHeader("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
-            Http.base.newCall(req).execute().use { resp ->
+            http.newCall(req).execute().use { resp ->
+                if (isAccessPage(resp)) throw RuntimeException(ACCESS_BLOCKED)
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
                     throw RuntimeException("HTTP ${resp.code}: ${text.take(200).ifBlank { resp.message }}")
+                }
+                // A 200 that is a web page (a proxy, a captive portal, the wrong URL) would otherwise surface as a
+                // JSON parser error about "<!DOCTYPE html>".
+                if (resp.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)) {
+                    throw RuntimeException("Got a web page instead of Hermes's JSON from ${resp.request.url.host}. Check that the URL points at Hermes.")
                 }
                 json.decodeFromString(ModelsResponse.serializer(), text).data
             }
@@ -276,7 +343,7 @@ class HermesClient(
             .post(body.toRequestBody(JSON_MEDIA))
             .build()
 
-        Http.base.newCall(request).enqueue(object : Callback {
+        http.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (!handle.closed.get()) cb.onError(e.message ?: "Connection failed")
             }
@@ -400,7 +467,7 @@ class HermesClient(
             .addHeader("Accept", "text/event-stream")
             .get()
             .build()
-        return EventSources.createFactory(Http.streaming).newEventSource(request, listener)
+        return EventSources.createFactory(httpStreaming).newEventSource(request, listener)
     }
 
     /** GET /v1/runs/{id}. A run Hermes has forgotten (finished long ago, or never existed) is [RunGoneException]. */
@@ -411,7 +478,7 @@ class HermesClient(
                 .addHeader("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
-            Http.base.newCall(req).execute().use { resp ->
+            http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (resp.code == 404) throw RunGoneException()
                 if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
@@ -428,7 +495,7 @@ class HermesClient(
                 .addHeader("Authorization", "Bearer $apiKey")
                 .post("".toRequestBody(JSON_MEDIA))
                 .build()
-            Http.base.newCall(req).execute().use { resp -> if (!resp.isSuccessful && resp.code != 404) throw RuntimeException("HTTP ${resp.code}") }
+            http.newCall(req).execute().use { resp -> if (!resp.isSuccessful && resp.code != 404) throw RuntimeException("HTTP ${resp.code}") }
         }
     }
 
@@ -448,7 +515,7 @@ class HermesClient(
                 .addHeader("Authorization", "Bearer $apiKey")
                 .post(body.toRequestBody(JSON_MEDIA))
                 .build()
-            val id = Http.base.newCall(create).execute().use { resp ->
+            val id = http.newCall(create).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (resp.code == 404) throw RuntimeException("this Hermes has no jobs API (HTTP 404)")
                 if (!resp.isSuccessful) {
@@ -465,7 +532,7 @@ class HermesClient(
                     .addHeader("Authorization", "Bearer $apiKey")
                     .post("".toRequestBody(JSON_MEDIA))
                     .build()
-                Http.base.newCall(run).execute().close()
+                http.newCall(run).execute().close()
             }
             id
         }
@@ -478,7 +545,7 @@ class HermesClient(
             .addHeader("Authorization", "Bearer $apiKey")
             .post(body.toRequestBody(JSON_MEDIA))
             .build()
-        Http.base.newCall(req).enqueue(object : Callback {
+        http.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {}
             override fun onResponse(call: Call, response: Response) { response.close() }
         })
@@ -493,5 +560,8 @@ class HermesClient(
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         const val TOOL_PROGRESS_EVENT = "hermes.tool.progress"
+        const val ACCESS_BLOCKED = "Cloudflare Access turned the request away (its login page came back instead of Hermes). " +
+            "Turn on Settings > Cloudflare Access with a Client ID and Secret, and make sure the Access policy for this " +
+            "host is a Service Auth policy that includes that token."
     }
 }

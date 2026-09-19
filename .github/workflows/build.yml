@@ -1,6 +1,7 @@
 name: Build
 
-# Build check: every pull request into master must compile before it can be merged.
+# Build check: every pull request into master must compile before it can be merged. It also leaves an installable
+# preview APK as a workflow artifact that is deleted after a day, so a change can be tried on a phone before merging.
 on:
   pull_request:
     branches: [master]
@@ -21,6 +22,30 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the version script needs every tag and commit
+
+      # A preview must install as an update over the last release and be replaced by the next one, but the
+      # release versionCode leaves room for that only in its last two digits (see next-version.sh):
+      #   last release  previous_code            e.g. 100100  (0.1.1)
+      #   this preview  previous_code + 1..99    e.g. 100103
+      #   next release  at least +100            e.g. 100200  (0.1.2), or higher for a minor/major bump
+      # The slot is the number of commits since the last release, so it rises with every push to a PR. It stops
+      # at 99; past that, previews of one release cycle share a code and reinstall over each other.
+      - name: Preview version
+        id: version
+        env:
+          PR: ${{ github.event.pull_request.number || 'dev' }}
+        run: |
+          out="$(.github/scripts/next-version.sh)"
+          get() { sed -n "s/^$1=//p" <<<"$out"; }
+          [ "$(get skip)" = false ] || { echo "HEAD is already a released commit; nothing to preview" >&2; exit 1; }
+          commits="$(get commits)"
+          slot=$(( commits < 1 ? 1 : commits > 99 ? 99 : commits ))
+          {
+            echo "name=$(get version)-pr$PR.$slot"
+            echo "code=$(( $(get previous_code) + slot ))"
+          } | tee -a "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
         with:
@@ -33,12 +58,48 @@ jobs:
       # The Android SDK is preinstalled on ubuntu-latest (ANDROID_HOME); Gradle fetches any missing
       # platform/build-tools. app/build.gradle downloads and checksum-verifies the sherpa-onnx AAR.
       - name: Build
-        run: ./gradlew :app:assembleDebug --stacktrace
+        run: >
+          ./gradlew :app:assembleDebug --stacktrace
+          -PappVersionName=${{ steps.version.outputs.name }}
+          -PappVersionCode=${{ steps.version.outputs.code }}
 
-      # No APK is uploaded on purpose: a ~150 MB artifact per push would eat storage quota if the
-      # repo ever goes private, and the Release workflow publishes the real APK on merge.
-      - name: Summary
+      # Same signing key as releases (app/debug.keystore), so this installs over a release and the reverse.
+      - name: Check the APK version
+        id: apk
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
         run: |
-          apk=app/build/outputs/apk/debug/app-debug.apk
-          echo "### Build OK" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$(basename "$apk")\` — $(du -h "$apk" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+          src=app/build/outputs/apk/debug/app-debug.apk
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+          badging="$("$build_tools/aapt2" dump badging "$src")"
+          grep -q "package: name='dk.foss.jarvis.debug' versionCode='$CODE' versionName='$NAME-debug'" <<<"$badging" \
+            || { echo "unexpected package/version in APK:"; grep '^package:' <<<"$badging"; exit 1; }
+          out="jarvis-$NAME-debug.apk"
+          cp "$src" "$out"
+          echo "apk=$out" >> "$GITHUB_OUTPUT"
+
+      # Kept for the minimum retention (1 day) so it can't pile up: a ~150 MB artifact per push would eat the
+      # storage quota if the repo ever goes private. The APK is already compressed, so don't zip it again.
+      - name: Upload preview APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.apk }}
+          path: ${{ steps.apk.outputs.apk }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Summary
+        env:
+          APK: ${{ steps.apk.outputs.apk }}
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
+        run: |
+          {
+            echo "### Build OK"
+            echo "\`$APK\` — $(du -h "$APK" | cut -f1), version \`$NAME\` (code $CODE)"
+            echo
+            echo "Download it from **Artifacts** at the bottom of this page (needs a GitHub login; deleted after 1 day)."
+            echo "It installs as an update over the last release and over earlier previews of this release cycle."
+          } >> "$GITHUB_STEP_SUMMARY"

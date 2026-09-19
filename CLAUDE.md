@@ -47,15 +47,19 @@ compile + the running app on a device.
 ## CI and releases
 
 Two workflows in `.github/workflows/`: **Build** (PRs into `master` → `:app:assembleDebug`) and **Release**
-(push to `master`, or manual with a bump type → debug APK + tag + GitHub Release). No build artifacts are
-uploaded anywhere. Details and the tested/untested list are in [`docs/releasing.md`](docs/releasing.md). What
-matters when editing:
+(push to `master`, or manual with a bump type → debug APK + tag + GitHub Release). The only artifact CI uploads
+is Build's preview APK, kept 1 day (`retention-days: 1`); releases go to the Releases page. Details and the
+tested/untested list are in [`docs/releasing.md`](docs/releasing.md). What matters when editing:
 
 - **Versioning is by tag, computed from commit messages** (`.github/scripts/next-version.sh`): `type!:` /
   `BREAKING CHANGE:` → major, `feat:` → minor, anything else → patch; first release is `0.1.0`. Write PR
   titles as conventional commits (they become the squash-merge message). `versionCode` =
-  `MAJOR*1000000 + MINOR*1000 + PATCH`. `app/build.gradle` takes `-PappVersionName` / `-PappVersionCode` and
-  defaults to `0.1.0` / `1`; don't hand-edit those defaults to cut a release.
+  `(MAJOR*1000000 + MINOR*1000 + PATCH) * 100`: the last two digits are a slot, `00` for a release, `01`..`99` for
+  a PR preview build (`previous_code + commits since the last release`, capped at 99), so a preview installs
+  over the last release and the next release installs over it. Don't drop the `* 100`: without it consecutive
+  releases have no number between them. `app/build.gradle` takes `-PappVersionName` / `-PappVersionCode` and
+  defaults to `0.1.0` / `1` (a local build with those defaults can't be installed over a release: Android
+  blocks a downgrade, "App not installed"); don't hand-edit those defaults to cut a release.
 - **Releases are debug builds** (`dk.foss.jarvis.debug`, `X.Y.Z-debug`), deliberately: this is a sideloaded
   app. Every debug build (local and CI) is signed with the committed `app/debug.keystore` — the standard
   auto-generated Android debug key (`android` / `androiddebugkey`), copied from the maintainer's
@@ -384,9 +388,11 @@ screens add `BackHandler { screen = Chat }`.
   dropdown of `SettingsStore.DELIVER_TARGETS`, default `telegram`, editable for `telegram:<id>` / `discord:#chan`;
   `DELIVER_OFF` disables both uses below): a platform's **home channel** (`/sethome` on the server) or `all`; without
   `deliver` Hermes only saves the output to a file. Two uses: (1) the chat's "→ Telegram" button
-  (`ChatViewModel.sendInBackground`) sends the typed task as a job; (2) `RunWatcher.relayToChannel` sends the *answer* of
-  a run the user **left running** (detached, so only when the watcher concludes it) when the app is not on screen, if
-  `relayLeft` is on: a job whose whole prompt is "reply with exactly this text", since the run itself can't deliver.
+  (`ChatViewModel.sendInBackground`) sends the typed task as a job, and the voice screen has the same button while Thinking
+  (`ConversationViewModel.sendTaskToChannel`: sends the spoken request as a job, and only once Hermes accepted it cancels the
+  local run) and while Speaking (`sendReplyToChannel`: sends the reply you already got); (2) `RunWatcher.relayToChannel` sends
+  the *answer* of a run the user **left running** (detached, so only when the watcher concludes it) when the app is not on
+  screen, **only if `relayLeft` is on, which is off by default** (leaving with X must not message a channel unasked): a job whose whole prompt is "reply with exactly this text", since the run itself can't deliver.
   Facts from the Hermes source: the create body needs `name`, `schedule`, `prompt` (≤ 5000 chars, injection-scanned: a 400
   carries the reason; the relay just logs it and the answer still reaches History and the notification); `reasoning_effort`
   is **not** accepted on create; a job runs in a **fresh session with no chat context**, so `backgroundPrompt` puts the last

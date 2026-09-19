@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import dk.foss.jarvis.data.SettingsStore
 
 @Composable
 fun ConversationScreen(
@@ -84,6 +86,8 @@ fun ConversationScreen(
     val stalled by vm.stalled
     val tools = vm.tools
     val ttsNotice by vm.ttsNotice
+    val deliverTarget by vm.deliverTarget
+    val deliveryNotice by vm.deliveryNotice
     val locked by vm.locked
     val unlockRequested by vm.unlockRequested
 
@@ -190,6 +194,12 @@ fun ConversationScreen(
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
                     )
+                    ConvState.Connecting -> ConnectingContent(
+                        onCancel = {
+                            if (hasPermission) vm.onMicTap()
+                            else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        },
+                    )
                     ConvState.Listening -> ListeningContent(
                         transcript = transcript,
                         onMicTap = {
@@ -201,6 +211,9 @@ fun ConversationScreen(
                         transcript = transcript,
                         stalled = stalled,
                         tools = tools,
+                        deliverTarget = deliverTarget,
+                        deliveryNotice = deliveryNotice,
+                        onSendToChannel = { vm.sendTaskToChannel() },
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -214,6 +227,9 @@ fun ConversationScreen(
                         listState = listState,
                         tools = tools,
                         notice = ttsNotice,
+                        deliverTarget = deliverTarget,
+                        deliveryNotice = deliveryNotice,
+                        onSendToChannel = { vm.sendReplyToChannel() },
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -348,6 +364,39 @@ private fun IdleContent(hasPermission: Boolean, hint: String?, onMicTap: () -> U
     }
 }
 
+/** Brief "checking Hermes is reachable" step before the mic opens — otherwise the screen sits unchanged for a
+ *  few seconds (looks broken) while [ConversationViewModel.startListening] runs its pre-flight checks. */
+@Composable
+private fun ConnectingContent(onCancel: () -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            StatusTag("CONNECTING", JarvisColors.ThinkBlue)
+            Spacer(Modifier.height(32.dp))
+            ThinkingOrbs()
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(JarvisColors.GlassBg)
+                    .border(1.dp, JarvisColors.Cyan.copy(alpha = 0.4f), CircleShape)
+                    .clickable { onCancel() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel", modifier = Modifier.size(26.dp), tint = JarvisColors.TextPrimary)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("Cancel", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextSecondary)
+        }
+    }
+}
+
 @Composable
 private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
     // Blinking caret
@@ -409,7 +458,17 @@ private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
 }
 
 @Composable
-private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit, onStop: () -> Unit) {
+private fun ThinkingContent(
+    transcript: String,
+    stalled: Boolean,
+    tools: List<ToolStep>,
+    /** Settings → Send finished tasks to; the "→ <channel>" button is hidden when this is [SettingsStore.DELIVER_OFF]. */
+    deliverTarget: String,
+    deliveryNotice: String?,
+    onSendToChannel: () -> Unit,
+    onMicTap: () -> Unit,
+    onStop: () -> Unit,
+) {
     // Blinking dots
     val transition = rememberInfiniteTransition(label = "blink")
     val dot1 by transition.animateFloat(
@@ -483,6 +542,31 @@ private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<To
                 }
             }
 
+            // Send this request to the channel instead of waiting here: it runs as a background task and the answer
+            // arrives there, like the chat's "→" button. Only shown once there is a request to send.
+            if (deliverTarget != SettingsStore.DELIVER_OFF && transcript.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onSendToChannel) {
+                    Text(
+                        "→ ${deliverTarget.replaceFirstChar { it.uppercase() }}",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Cyan,
+                    )
+                }
+            }
+
+            deliveryNotice?.let {
+                Text(
+                    text = it,
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                )
+            }
+
             if (tools.isNotEmpty()) {
                 Spacer(Modifier.height(24.dp))
                 ToolActivity(tools, Modifier.fillMaxWidth().padding(horizontal = 24.dp))
@@ -507,6 +591,10 @@ private fun SpeakingContent(
     listState: androidx.compose.foundation.lazy.LazyListState,
     tools: List<ToolStep>,
     notice: String?,
+    /** Settings → Send finished tasks to; the "→ <channel>" button below is hidden when this is [SettingsStore.DELIVER_OFF]. */
+    deliverTarget: String,
+    deliveryNotice: String?,
+    onSendToChannel: () -> Unit,
     onMicTap: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -527,6 +615,27 @@ private fun SpeakingContent(
             Spacer(Modifier.height(8.dp))
 
             StatusTag("SPEAKING", JarvisColors.Cyan)
+
+            if (deliverTarget != SettingsStore.DELIVER_OFF) {
+                TextButton(onClick = onSendToChannel) {
+                    Text(
+                        "→ ${deliverTarget.replaceFirstChar { it.uppercase() }}",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Cyan,
+                    )
+                }
+            }
+
+            deliveryNotice?.let {
+                Text(
+                    text = it,
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                    textAlign = TextAlign.Center,
+                )
+            }
 
             notice?.let {
                 Spacer(Modifier.height(8.dp))

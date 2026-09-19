@@ -11,6 +11,7 @@ import dk.foss.jarvis.voice.LocalSttModel
 import dk.foss.jarvis.voice.LocalTtsModel
 import dk.foss.jarvis.wake.WakeModels
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore(name = "jarvis_settings")
@@ -44,8 +45,8 @@ data class JarvisSettings(
      * `discord`, ...), `all`, or [SettingsStore.DELIVER_OFF] for nowhere.
      */
     val deliverTarget: String = SettingsStore.DEFAULT_DELIVER_TARGET,
-    /** Also send the answer of a task you left running (closed the screen or the app) to [deliverTarget] when it finishes. */
-    val relayLeft: Boolean = true,
+    /** Also send the answer of a task you left running (closed the screen or the app) to [deliverTarget] when it finishes. Opt-in: leaving with X only leaves, it must not message a channel unasked. */
+    val relayLeft: Boolean = false,
     /**
      * Send each turn as a Hermes run, so it keeps going on the server when the app is left and only Cancel stops it.
      * Off = the plain chat stream, which Hermes cancels as soon as the app disconnects.
@@ -74,6 +75,12 @@ data class JarvisSettings(
      * things that start listening on their own, so an accidental gesture in a pocket doesn't record audio.
      */
     val autoListenOnAssist: Boolean = false,
+    /**
+     * Optional outer authentication for a Hermes server exposed through a Cloudflare Tunnel behind Cloudflare
+     * Access, sent as CF-Access-Client-Id/Secret headers in front of Hermes's own auth (see [HermesClient]).
+     * clientId/clientSecret live in [SecureCredentialStore], not DataStore like the rest of these fields.
+     */
+    val cloudflareAccess: CloudflareAccessConfig = CloudflareAccessConfig(),
 ) {
     val deliverEnabled: Boolean get() = deliverTarget != SettingsStore.DELIVER_OFF
     val isConfigured: Boolean get() = baseUrl.isNotEmpty() && apiKey.isNotEmpty()
@@ -117,9 +124,17 @@ class SettingsStore(private val context: Context) {
         val WAKE_SENSITIVITY = intPreferencesKey("wake_sensitivity")
         val ASSISTANT_NAME = stringPreferencesKey("assistant_name")
         val AUTO_LISTEN_ASSIST = booleanPreferencesKey("auto_listen_assist")
+        // Just the on/off switch — not sensitive, so it lives here like everything else. The client id/secret
+        // themselves are in SecureCredentialStore, never in this plaintext DataStore.
+        val CF_ACCESS_ENABLED = booleanPreferencesKey("cf_access_enabled")
     }
 
-    val settings: Flow<JarvisSettings> = context.dataStore.data.map { p ->
+    private val secureCredentials = SecureCredentialStore(context)
+
+    val settings: Flow<JarvisSettings> = combine(
+        context.dataStore.data,
+        secureCredentials.credentials,
+    ) { p, (cfClientId, cfClientSecret) ->
         JarvisSettings(
             baseUrl = p[Keys.BASE_URL] ?: BuildConfig.DEFAULT_BASE_URL,
             apiKey = p[Keys.API_KEY] ?: BuildConfig.DEFAULT_API_KEY,
@@ -141,7 +156,7 @@ class SettingsStore(private val context: Context) {
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
             deliverTarget = (p[Keys.DELIVER_TARGET] ?: "").ifBlank { DEFAULT_DELIVER_TARGET },
-            relayLeft = p[Keys.RELAY_LEFT] ?: true,
+            relayLeft = p[Keys.RELAY_LEFT] ?: false,
             useRuns = p[Keys.USE_RUNS] ?: true,
             thinking = (p[Keys.THINKING] ?: "").takeIf { v -> THINKING_LEVELS.any { it.first == v } } ?: "",
             lockedGuard = p[Keys.LOCKED_GUARD] ?: true,
@@ -151,6 +166,11 @@ class SettingsStore(private val context: Context) {
             wakeSensitivity = (p[Keys.WAKE_SENSITIVITY] ?: 1).coerceIn(0, 2),
             assistantName = (p[Keys.ASSISTANT_NAME] ?: "").ifBlank { BuildConfig.DEFAULT_ASSISTANT_NAME },
             autoListenOnAssist = p[Keys.AUTO_LISTEN_ASSIST] ?: false,
+            cloudflareAccess = CloudflareAccessConfig(
+                enabled = p[Keys.CF_ACCESS_ENABLED] ?: false,
+                clientId = cfClientId,
+                clientSecret = cfClientSecret,
+            ),
         )
     }
 
@@ -236,11 +256,24 @@ class SettingsStore(private val context: Context) {
 
     suspend fun updateConnection(baseUrl: String, apiKey: String, model: String, provider: String) {
         context.dataStore.edit { p ->
-            p[Keys.BASE_URL] = baseUrl.trim().trimEnd('/')
+            // A bare host ("hermes.example.com", typical for a Cloudflare Tunnel) has no scheme, which OkHttp
+            // rejects with an exception; assume https for it. An explicit http:// or https:// is kept as typed.
+            val url = baseUrl.trim().trimEnd('/')
+            p[Keys.BASE_URL] = if (url.isNotEmpty() && !url.contains("://")) "https://$url" else url
             p[Keys.API_KEY] = apiKey.trim()
             p[Keys.MODEL] = model.trim().ifEmpty { DEFAULT_MODEL }
             p[Keys.PROVIDER] = provider.trim()
         }
+    }
+
+    /**
+     * The on/off switch goes to DataStore like everything else; the credentials go to [SecureCredentialStore]
+     * (Keystore-backed encrypted storage) and never touch plaintext prefs. Values are trimmed so accidental
+     * leading/trailing whitespace (easy to paste in) doesn't silently break the CF-Access-Client-* headers.
+     */
+    suspend fun updateCloudflareAccess(enabled: Boolean, clientId: String, clientSecret: String) {
+        context.dataStore.edit { p -> p[Keys.CF_ACCESS_ENABLED] = enabled }
+        secureCredentials.update(clientId.trim(), clientSecret.trim())
     }
 
     suspend fun updateVoice(elevenKey: String, elevenVoiceId: String) {

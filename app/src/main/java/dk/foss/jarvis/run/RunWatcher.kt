@@ -95,7 +95,7 @@ class RunWatcher private constructor(private val app: Context) {
 
     private suspend fun client(): HermesClient {
         val s = settings.settings.first()
-        return HermesClient(s.baseUrl, s.apiKey) // fresh per request, like everywhere else
+        return HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess) // fresh per request, like everywhere else
     }
 
     private fun startPolling(entry: Entry) {
@@ -162,7 +162,7 @@ class RunWatcher private constructor(private val app: Context) {
         val head = "Deliver the message below to the user. Reply with exactly that text and nothing else: do not add, " +
             "change, summarize or comment on it, and do not use any tools.\n\n"
         val body = if (head.length + text.length <= MAX_JOB_PROMPT) text else text.take(MAX_JOB_PROMPT - head.length - 1) + "\u2026"
-        return HermesClient(s.baseUrl, s.apiKey).createBackgroundJob("Jarvis: answer", head + body, s.deliverTarget)
+        return HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).createBackgroundJob("Jarvis: answer", head + body, s.deliverTarget)
             .onFailure { Log.w(TAG, "sending the answer to ${s.deliverTarget} failed: ${it.message}") }
             .map { s.deliverTarget }
             .getOrNull()

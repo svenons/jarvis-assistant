@@ -6,7 +6,11 @@
 #   skip      true if HEAD is already a released commit (nothing to do), else false
 #   previous  the last release tag, or empty for the first release
 #   version   e.g. 1.4.0        tag  e.g. v1.4.0
-#   code      Android versionCode: MAJOR*1000000 + MINOR*1000 + PATCH
+#   code      Android versionCode: (MAJOR*1000000 + MINOR*1000 + PATCH) * 100. The last two digits are
+#             a slot that is 00 for a release; pull-request preview builds use 01..99 so they sort above
+#             the last release and below the next one (see .github/workflows/build.yml).
+#   previous_code  the last release's code (0 before the first release); a preview is previous_code + 1..99
+#   commits   commits between the last release and HEAD (all of them before the first release)
 #   bump      initial | major | minor | patch
 #
 # Bump rules (BUMP=auto, the default), applied to every commit since the last tag, so it works for
@@ -37,8 +41,12 @@ previous="$(git tag --list "$TAG_GLOB" --sort=-v:refname | grep -E "$TAG_RE" | h
 if [ -z "$previous" ]; then
   major=0 minor=1 patch=0
   bump="initial"
+  previous_code=0
+  commits="$(git rev-list --count HEAD)"
 else
   IFS=. read -r major minor patch <<<"${previous#v}"
+  previous_code=$(((major * 1000000 + minor * 1000 + patch) * 100))
+  commits="$(git rev-list --count "$previous..HEAD")"
   range="$previous..HEAD"
 
   if [ "$BUMP" = auto ]; then
@@ -66,10 +74,19 @@ if [ "$minor" -ge 1000 ] || [ "$patch" -ge 1000 ]; then
   exit 1
 fi
 
+code=$(((major * 1000000 + minor * 1000 + patch) * 100))
+# Android's versionCode is a signed 32-bit int (this allows major versions up to 21).
+if [ "$code" -gt 2147483647 ]; then
+  echo "versionCode $code overflows a 32-bit int" >&2
+  exit 1
+fi
+
 version="$major.$minor.$patch"
 echo "skip=false"
 echo "previous=$previous"
 echo "version=$version"
 echo "tag=v$version"
-echo "code=$((major * 1000000 + minor * 1000 + patch))"
+echo "code=$code"
+echo "previous_code=$previous_code"
+echo "commits=$commits"
 echo "bump=$bump"
