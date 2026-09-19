@@ -51,8 +51,9 @@ class MainActivity : ComponentActivity() {
     // jump into conversation mode (works for both cold start and onNewIntent).
     private var assistEpoch by mutableStateOf(0)
 
-    // Incremented for a genuine "Hey Jarvis" wake-word detection (EXTRA_FROM_ASSIST), and for a bare
-    // ACTION_ASSIST (the system assistant gesture, e.g. long-press home) only when the user opted into that via
+    // Incremented for a genuine "Hey Jarvis" wake-word detection (EXTRA_FROM_ASSIST), and for the system
+    // assist gesture (e.g. long-press home/power — delivered either via our VoiceInteractionSession as
+    // EXTRA_FROM_ASSIST_GESTURE, or as a bare ACTION_ASSIST) only when the user opted into that via
     // Settings → "Start listening on the assist gesture" (see [shouldAutoListen]/autoListenOnAssist). assistEpoch
     // above still navigates to the voice screen either way, but only a fresh wakeEpoch (or an explicit mic tap)
     // makes the voice screen start listening on its own — otherwise it lands on Idle and waits for a tap, so an
@@ -290,15 +291,23 @@ class MainActivity : ComponentActivity() {
 
     private fun isAssistIntent(i: Intent?): Boolean =
         i?.getBooleanExtra(EXTRA_FROM_ASSIST, false) == true ||
+            i?.getBooleanExtra(EXTRA_FROM_ASSIST_GESTURE, false) == true ||
             i?.action == Intent.ACTION_ASSIST
 
-    /** A genuine wake-word launch always starts listening; a bare assist gesture only does when opted in. */
+    /**
+     * A genuine wake-word launch (EXTRA_FROM_ASSIST, from WakeWordService) always starts listening.
+     * The system assist gesture — whether routed through our VoiceInteractionSession
+     * (EXTRA_FROM_ASSIST_GESTURE) or delivered as a bare ACTION_ASSIST — only does when opted in via
+     * Settings → "Start listening on the assist gesture".
+     */
     private fun shouldAutoListen(i: Intent?): Boolean =
         i?.getBooleanExtra(EXTRA_FROM_ASSIST, false) == true ||
-            (i?.action == Intent.ACTION_ASSIST && autoListenOnAssist)
+            (autoListenOnAssist &&
+                (i?.getBooleanExtra(EXTRA_FROM_ASSIST_GESTURE, false) == true || i?.action == Intent.ACTION_ASSIST))
 
     companion object {
         const val EXTRA_FROM_ASSIST = "from_assist"
+        const val EXTRA_FROM_ASSIST_GESTURE = "from_assist_gesture"
         const val EXTRA_OPEN_CONVERSATION = "open_conversation"
     }
 }

@@ -207,6 +207,24 @@ class HermesClient(
     suspend fun testConnection(): Result<List<String>> = fetchModels().map { models -> models.map { it.id } }
 
     /**
+     * A quick "can we even reach Hermes" check, with a short timeout ([Http.probe]) so being off the right
+     * network (e.g. away from home wifi with no tunnel set up) fails in a few seconds instead of only surfacing
+     * after the mic has recorded, STT has transcribed, and the real request has waited out its full timeout.
+     * Any HTTP response — even an error one — counts as reachable; only a failed connection doesn't.
+     */
+    suspend fun isReachable(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$baseUrl/v1/models")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .get()
+                .build()
+            Http.probe.newCall(req).execute().use { }
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
      * GET /v1/models: `hermes-agent` (meaning "Hermes's own default model") plus any model routes the server's
      * admin configured. These are the only names a request can pick without also naming a provider.
      */

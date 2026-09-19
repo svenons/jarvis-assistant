@@ -25,7 +25,7 @@ class JarvisInteractionSession(context: Context) : VoiceInteractionSession(conte
         Log.d(TAG, "onShow flags=$showFlags — launching MainActivity")
         val intent = Intent(context, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(MainActivity.EXTRA_FROM_ASSIST, true)
+            putExtra(MainActivity.EXTRA_FROM_ASSIST_GESTURE, true)
         }
         // startAssistantActivity() is the assistant-sanctioned launch; it is exempt
         // from background-activity-launch limits (plain context.startActivity is not,

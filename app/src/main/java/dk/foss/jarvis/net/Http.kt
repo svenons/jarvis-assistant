@@ -20,4 +20,14 @@ object Http {
     val streaming: OkHttpClient = base.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
+
+    /**
+     * Short timeouts for a quick "is the server even reachable" check. [base]'s 20 s connect timeout is fine for a
+     * request already worth waiting on, but too slow to gate starting the mic on — off-network (no wifi, wrong
+     * network) should fail in a few seconds, not twenty.
+     */
+    val probe: OkHttpClient = base.newBuilder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .build()
 }
