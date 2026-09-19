@@ -388,9 +388,11 @@ screens add `BackHandler { screen = Chat }`.
   dropdown of `SettingsStore.DELIVER_TARGETS`, default `telegram`, editable for `telegram:<id>` / `discord:#chan`;
   `DELIVER_OFF` disables both uses below): a platform's **home channel** (`/sethome` on the server) or `all`; without
   `deliver` Hermes only saves the output to a file. Two uses: (1) the chat's "→ Telegram" button
-  (`ChatViewModel.sendInBackground`) sends the typed task as a job; (2) `RunWatcher.relayToChannel` sends the *answer* of
-  a run the user **left running** (detached, so only when the watcher concludes it) when the app is not on screen, if
-  `relayLeft` is on: a job whose whole prompt is "reply with exactly this text", since the run itself can't deliver.
+  (`ChatViewModel.sendInBackground`) sends the typed task as a job, and the voice screen has the same button while Thinking
+  (`ConversationViewModel.sendTaskToChannel`: sends the spoken request as a job, and only once Hermes accepted it cancels the
+  local run) and while Speaking (`sendReplyToChannel`: sends the reply you already got); (2) `RunWatcher.relayToChannel` sends
+  the *answer* of a run the user **left running** (detached, so only when the watcher concludes it) when the app is not on
+  screen, **only if `relayLeft` is on, which is off by default** (leaving with X must not message a channel unasked): a job whose whole prompt is "reply with exactly this text", since the run itself can't deliver.
   Facts from the Hermes source: the create body needs `name`, `schedule`, `prompt` (≤ 5000 chars, injection-scanned: a 400
   carries the reason; the relay just logs it and the answer still reaches History and the notification); `reasoning_effort`
   is **not** accepted on create; a job runs in a **fresh session with no chat context**, so `backgroundPrompt` puts the last

@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import dk.foss.jarvis.data.ConversationRepository
 import dk.foss.jarvis.data.PendingRun
 import dk.foss.jarvis.data.SettingsStore
-import dk.foss.jarvis.data.UiMessage
 import dk.foss.jarvis.hermes.HermesClient
 import dk.foss.jarvis.run.RunWatcher
 import kotlinx.coroutines.flow.first
@@ -189,30 +188,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * A background job runs in a fresh session and knows nothing of this chat, so the prompt carries the last few
-     * messages for context. Null if the task itself doesn't fit Hermes's prompt limit; older context is cut first.
-     */
-    private fun backgroundPrompt(task: String, earlier: List<UiMessage>): String? {
-        val head = "You are running as a background task for the user, who is away. Your final reply is sent to them " +
-            "as a message, so make it complete and self-contained, and do not ask questions.\n\n"
-        val tail = "Task:\n$task"
-        val budget = MAX_JOB_PROMPT - head.length - tail.length - 60
-        if (budget < 0) return null
-        val context = earlier.filter { !it.isError && !UiMessage.isAnnotation(it.role) }.takeLast(6)
-            .joinToString("\n") { "${if (it.role == "user") "User" else "Assistant"}: ${it.text.trim().take(600)}" }
-            .takeLast(budget)
-        return head + (if (context.isEmpty()) "" else "Recent conversation, for context:\n$context\n\n") + tail
-    }
-
     /** The run ended while we were listening, so the result is already in the conversation. */
     private fun endRun() {
         repo.pendingRun?.runId?.let { watcher.finish(it) }
         repo.updatePendingRun(null)
-    }
-
-    private companion object {
-        const val MAX_JOB_PROMPT = 4900 // Hermes rejects job prompts over 5000 characters
     }
 
     override fun onCleared() {

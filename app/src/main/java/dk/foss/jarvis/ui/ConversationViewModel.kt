@@ -697,9 +697,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * "Send to <channel>" (Speaking screen): relay the reply that's currently being shown/spoken to the delivery
-     * channel (Settings → Send finished tasks to), the same one the chat's "→" button uses. Voice has no text box
-     * to hand that button a task, so this instead sends the answer you already got — for when you want it kept or
-     * shared as a message rather than only spoken. Independent of the live turn: it neither stops nor is stopped
+     * channel (Settings → Send finished tasks to), the same one the chat's "→" button uses. Unlike
+     * [sendTaskToChannel] (Thinking screen, sends the request), this sends the answer you already got — for when you
+     * want it kept or shared as a message rather than only spoken. Independent of the live turn: it neither stops nor is stopped
      * by it, and failure is reported in [deliveryNotice], never routed through [error]/[hint].
      */
     fun sendReplyToChannel() {
@@ -715,6 +715,43 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             val body = if (head.length + text.length <= MAX_JOB_PROMPT) text else text.take(MAX_JOB_PROMPT - head.length - 1) + "…"
             HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).createBackgroundJob("Jarvis: answer", head + body, target)
                 .onSuccess { deliveryNotice.value = "Sent to your $target." }
+                .onFailure { deliveryNotice.value = "Couldn’t send to $target: ${it.message}" }
+        }
+    }
+
+    /**
+     * "→ <channel>" (Thinking screen): the voice twin of the chat's "→" button. Hands the request you just spoke to
+     * Hermes as a background job whose answer is delivered to the channel (Settings → Send finished tasks to), and
+     * ends this turn so the same work isn't done twice. The turn is only ended once Hermes accepted the job; if it
+     * refuses, the turn carries on and [deliveryNotice] says why.
+     */
+    fun sendTaskToChannel() {
+        val task = transcript.value.trim()
+        if (task.isEmpty()) return
+        val myTurn = turn
+        // `think` already saved the utterance, so the job's context is what came before it.
+        val all = repo.messages.toList()
+        val earlier = all.subList(0, all.indexOfLast { it.role == "user" }.coerceAtLeast(0))
+        viewModelScope.launch {
+            val s = settings ?: settingsStore.settings.first().also { settings = it }
+            if (!s.isConfigured || !s.deliverEnabled) return@launch
+            val target = s.deliverTarget
+            deliveryNotice.value = null
+            val prompt = backgroundPrompt(task, earlier)
+            if (prompt == null) {
+                deliveryNotice.value = "That request is too long to send in the background."
+                return@launch
+            }
+            val name = "Jarvis: " + task.replace(Regex("\\s+"), " ").take(80)
+            HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).createBackgroundJob(name, prompt, target)
+                .onSuccess { id ->
+                    if (turn == myTurn) onStopTap() // cancels the local run and goes idle; it must not also listen
+                    val step = "job-$id"
+                    repo.addToolMessage(step, toolLine("📨", "background", "Sent as a background task. The answer goes to your $target home channel."))
+                    repo.finishTool(step)
+                    repo.persistAsync()
+                    hint.value = "Sent to your $target. The answer will arrive there."
+                }
                 .onFailure { deliveryNotice.value = "Couldn’t send to $target: ${it.message}" }
         }
     }
@@ -792,6 +829,5 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         const val STALL_MS = 800L
         const val WAKE_REARM_DELAY_MS = 1200L
         const val MAX_EMPTY_WAKE = 2 // consecutive empty wake turns before requiring a tap
-        const val MAX_JOB_PROMPT = 4900 // Hermes rejects job prompts over 5000 characters
     }
 }

@@ -136,7 +136,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var useRuns by remember { mutableStateOf(true) }
     var deliverTarget by remember { mutableStateOf(SettingsStore.DEFAULT_DELIVER_TARGET) }
     var deliverMenu by remember { mutableStateOf(false) }
-    var relayLeft by remember { mutableStateOf(true) }
+    var relayLeft by remember { mutableStateOf(false) }
     var thinkingMenu by remember { mutableStateOf(false) }
     var assistantName by remember { mutableStateOf("") }
     var savedName by remember { mutableStateOf("") } // last name the wake service was told about

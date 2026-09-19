@@ -45,8 +45,8 @@ data class JarvisSettings(
      * `discord`, ...), `all`, or [SettingsStore.DELIVER_OFF] for nowhere.
      */
     val deliverTarget: String = SettingsStore.DEFAULT_DELIVER_TARGET,
-    /** Also send the answer of a task you left running (closed the screen or the app) to [deliverTarget] when it finishes. */
-    val relayLeft: Boolean = true,
+    /** Also send the answer of a task you left running (closed the screen or the app) to [deliverTarget] when it finishes. Opt-in: leaving with X only leaves, it must not message a channel unasked. */
+    val relayLeft: Boolean = false,
     /**
      * Send each turn as a Hermes run, so it keeps going on the server when the app is left and only Cancel stops it.
      * Off = the plain chat stream, which Hermes cancels as soon as the app disconnects.
@@ -156,7 +156,7 @@ class SettingsStore(private val context: Context) {
             showReasoning = p[Keys.SHOW_REASONING] ?: true,
             voicePrompt = p[Keys.VOICE_PROMPT] ?: "",
             deliverTarget = (p[Keys.DELIVER_TARGET] ?: "").ifBlank { DEFAULT_DELIVER_TARGET },
-            relayLeft = p[Keys.RELAY_LEFT] ?: true,
+            relayLeft = p[Keys.RELAY_LEFT] ?: false,
             useRuns = p[Keys.USE_RUNS] ?: true,
             thinking = (p[Keys.THINKING] ?: "").takeIf { v -> THINKING_LEVELS.any { it.first == v } } ?: "",
             lockedGuard = p[Keys.LOCKED_GUARD] ?: true,

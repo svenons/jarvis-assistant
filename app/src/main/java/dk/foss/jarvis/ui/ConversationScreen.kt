@@ -211,6 +211,9 @@ fun ConversationScreen(
                         transcript = transcript,
                         stalled = stalled,
                         tools = tools,
+                        deliverTarget = deliverTarget,
+                        deliveryNotice = deliveryNotice,
+                        onSendToChannel = { vm.sendTaskToChannel() },
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -455,7 +458,17 @@ private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
 }
 
 @Composable
-private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit, onStop: () -> Unit) {
+private fun ThinkingContent(
+    transcript: String,
+    stalled: Boolean,
+    tools: List<ToolStep>,
+    /** Settings → Send finished tasks to; the "→ <channel>" button is hidden when this is [SettingsStore.DELIVER_OFF]. */
+    deliverTarget: String,
+    deliveryNotice: String?,
+    onSendToChannel: () -> Unit,
+    onMicTap: () -> Unit,
+    onStop: () -> Unit,
+) {
     // Blinking dots
     val transition = rememberInfiniteTransition(label = "blink")
     val dot1 by transition.animateFloat(
@@ -527,6 +540,31 @@ private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<To
                     Box(Modifier.size(6.dp).alpha(dot2).background(JarvisColors.ThinkBlue, CircleShape))
                     Box(Modifier.size(6.dp).alpha(dot3).background(JarvisColors.ThinkBlue, CircleShape))
                 }
+            }
+
+            // Send this request to the channel instead of waiting here: it runs as a background task and the answer
+            // arrives there, like the chat's "→" button. Only shown once there is a request to send.
+            if (deliverTarget != SettingsStore.DELIVER_OFF && transcript.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onSendToChannel) {
+                    Text(
+                        "→ ${deliverTarget.replaceFirstChar { it.uppercase() }}",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Cyan,
+                    )
+                }
+            }
+
+            deliveryNotice?.let {
+                Text(
+                    text = it,
+                    fontFamily = DmSans,
+                    fontSize = 12.sp,
+                    color = JarvisColors.Muted,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                )
             }
 
             if (tools.isNotEmpty()) {
