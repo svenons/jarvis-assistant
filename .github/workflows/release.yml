@@ -77,7 +77,9 @@ jobs:
           # Signed with the committed debug key (app/debug.keystore), so it installs over earlier releases
           # and over builds from the maintainer's machine, rather than with a key the runner made up.
           "$build_tools/apksigner" verify --print-certs "$src" | tee "$RUNNER_TEMP/certs.txt"
-          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")"
+          # apksigner's label varies by version ("Signer #1 certificate ..." on older build-tools,
+          # "V1/V2/V3 Signer: certificate ..." on newer ones) but always ends in "SHA-256 digest: <hex>".
+          actual="$(sed -n 's/.*SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt" | head -n1)"
           expected="$(keytool -list -v -keystore app/debug.keystore -storepass android 2>/dev/null \
             | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')"
           [ -n "$actual" ] && [ "$actual" = "$expected" ] \
