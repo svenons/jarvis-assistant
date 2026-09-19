@@ -149,6 +149,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     var wakeEnabled by remember { mutableStateOf(false) }
     var wakeBackground by remember { mutableStateOf(true) }
+    var autoListenOnAssist by remember { mutableStateOf(false) }
     var localStt by remember { mutableStateOf(false) }
     val sttStore = remember { LocalSttStore.get(context) }
     val sttStates by sttStore.states.collectAsState()
@@ -303,6 +304,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         elevenVoice = s.elevenVoiceId
         wakeEnabled = s.wakeEnabled
         wakeBackground = s.wakeBackground
+        autoListenOnAssist = s.autoListenOnAssist
         localStt = s.useLocalStt
         sttModelId = s.localSttModel
         localTts = s.useLocalTts
@@ -1192,6 +1194,39 @@ fun SettingsScreen(onBack: () -> Unit) {
                     color = JarvisColors.Muted,
                 )
                 NeutralButton("Set as default assistant") { openAssistantSettings(context) }
+
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Start listening on the assist gesture",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "Off (default): the assist gesture opens the voice screen and waits for a tap, so an " +
+                                "accidental gesture in your pocket doesn't record audio. On: it starts listening " +
+                                "immediately, the same as the wake word.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = autoListenOnAssist,
+                        onCheckedChange = {
+                            autoListenOnAssist = it
+                            scope.launch { store.updateAutoListenOnAssist(it) }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
             }
         }
     }

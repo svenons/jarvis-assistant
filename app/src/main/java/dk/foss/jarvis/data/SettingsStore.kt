@@ -67,6 +67,13 @@ data class JarvisSettings(
     val wakeSensitivity: Int = 1,
     /** What the assistant is called in the app and its notifications (never blank). */
     val assistantName: String = BuildConfig.DEFAULT_ASSISTANT_NAME,
+    /**
+     * Start listening immediately when launched by the system assist gesture (long-press power/home), the same
+     * way a genuine wake-word detection does. Off (the default): the assist gesture still opens the voice
+     * screen, but lands on Idle and waits for a tap — a wake-word detection or an explicit mic tap are the only
+     * things that start listening on their own, so an accidental gesture in a pocket doesn't record audio.
+     */
+    val autoListenOnAssist: Boolean = false,
 ) {
     val deliverEnabled: Boolean get() = deliverTarget != SettingsStore.DELIVER_OFF
     val isConfigured: Boolean get() = baseUrl.isNotEmpty() && apiKey.isNotEmpty()
@@ -109,6 +116,7 @@ class SettingsStore(private val context: Context) {
         val WAKE_CUSTOM_NAME = stringPreferencesKey("wake_custom_name")
         val WAKE_SENSITIVITY = intPreferencesKey("wake_sensitivity")
         val ASSISTANT_NAME = stringPreferencesKey("assistant_name")
+        val AUTO_LISTEN_ASSIST = booleanPreferencesKey("auto_listen_assist")
     }
 
     val settings: Flow<JarvisSettings> = context.dataStore.data.map { p ->
@@ -142,6 +150,7 @@ class SettingsStore(private val context: Context) {
             wakeCustomName = p[Keys.WAKE_CUSTOM_NAME] ?: "",
             wakeSensitivity = (p[Keys.WAKE_SENSITIVITY] ?: 1).coerceIn(0, 2),
             assistantName = (p[Keys.ASSISTANT_NAME] ?: "").ifBlank { BuildConfig.DEFAULT_ASSISTANT_NAME },
+            autoListenOnAssist = p[Keys.AUTO_LISTEN_ASSIST] ?: false,
         )
     }
 
@@ -151,6 +160,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun updateWakeBackground(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.WAKE_BACKGROUND] = enabled }
+    }
+
+    suspend fun updateAutoListenOnAssist(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.AUTO_LISTEN_ASSIST] = enabled }
     }
 
     suspend fun updateLocalStt(enabled: Boolean) {

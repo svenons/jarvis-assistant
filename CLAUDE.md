@@ -232,15 +232,19 @@ screens add `BackHandler { screen = Chat }`.
   intent, so `onCreate` only bumps `assistEpoch` when `savedInstanceState == null`; otherwise rotating would jump to the
   voice screen and start listening. (`screen` is a plain `remember`, so a rotation still returns to Chat.)
 - **Opening the voice screen doesn't start listening unless something explicit asked for it — a bare app/assist
-  launch never records audio.** `assistEpoch` (bumped by both a genuine wake-word launch, `EXTRA_FROM_ASSIST`, and
-  a bare system `ACTION_ASSIST` gesture) only *navigates* to `Screen.Conversation`. A separate `wakeEpoch` bumps
-  ONLY for `EXTRA_FROM_ASSIST`, and `ConversationScreen`'s `autoListen` param (`wakeEpoch != consumedWakeEpoch`,
-  OR the Chat screen's mic icon was just tapped, tracked via `manualVoiceTap`) is what actually starts listening
-  on entry; a bare `ACTION_ASSIST` gesture or opening the app while locked with no fresh trigger lands on Idle and
-  waits for a tap instead. `consumedWakeEpoch`/`manualVoiceTap` live in `MainActivity`'s composable, outside the
-  `when (screen)` block, so they survive Chat↔Conversation switches without replaying a stale trigger. This was
-  added to stop pocket/assist-gesture "butt dials" from recording audio automatically — only a real "Hey Jarvis"
-  detection or an explicit mic tap does.
+  launch never records audio, unless you opt in.** `assistEpoch` (bumped by both a genuine wake-word launch,
+  `EXTRA_FROM_ASSIST`, and a bare system `ACTION_ASSIST` gesture) only *navigates* to `Screen.Conversation`. A
+  separate `wakeEpoch` bumps for `EXTRA_FROM_ASSIST` always, and for a bare `ACTION_ASSIST` only when Settings →
+  "Start listening on the assist gesture" (`autoListenOnAssist`, default off) is on (`MainActivity.shouldAutoListen`).
+  `ConversationScreen`'s `autoListen` param (`wakeEpoch != consumedWakeEpoch`, OR the Chat screen's mic icon was
+  just tapped, tracked via `manualVoiceTap`) is what actually starts listening on entry; with the setting off, a
+  bare `ACTION_ASSIST` gesture or opening the app while locked with no fresh trigger lands on Idle and waits for a
+  tap instead. `consumedWakeEpoch`/`manualVoiceTap` live in `MainActivity`'s composable, outside the `when (screen)`
+  block, so they survive Chat↔Conversation switches without replaying a stale trigger. `autoListenOnAssist` is also
+  cached in a `@Volatile` field (alongside `wakeInBackground`) so the synchronous `onCreate`/`onNewIntent` check
+  doesn't block on DataStore; on the very first cold start via the assist gesture it can lag one launch behind a
+  freshly-changed setting. This was added to stop pocket/assist-gesture "butt dials" from recording audio
+  automatically by default — only a real "Hey Jarvis" detection or an explicit mic tap does, unless opted in.
 - **`JarvisRecognitionService` is a deliberate no-op** (returns `ERROR_CLIENT`).
   It exists ONLY because a `VoiceInteractionService` must declare a
   `recognitionService` in `interaction_service.xml`. Deleting it breaks assistant

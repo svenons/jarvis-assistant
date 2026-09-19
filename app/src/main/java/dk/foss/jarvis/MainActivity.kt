@@ -51,11 +51,12 @@ class MainActivity : ComponentActivity() {
     // jump into conversation mode (works for both cold start and onNewIntent).
     private var assistEpoch by mutableStateOf(0)
 
-    // Incremented ONLY for a genuine "Hey Jarvis" wake-word detection (EXTRA_FROM_ASSIST), never for a bare
-    // ACTION_ASSIST (the system assistant gesture, e.g. long-press home) or a plain app launch. assistEpoch
-    // above still navigates to the voice screen for any of those, but only a fresh wakeEpoch (or an explicit
-    // mic tap) makes the voice screen start listening on its own — otherwise it lands on Idle and waits for a
-    // tap, so an accidental assist-gesture or app open doesn't record audio ("butt dials").
+    // Incremented for a genuine "Hey Jarvis" wake-word detection (EXTRA_FROM_ASSIST), and for a bare
+    // ACTION_ASSIST (the system assistant gesture, e.g. long-press home) only when the user opted into that via
+    // Settings → "Start listening on the assist gesture" (see [shouldAutoListen]/autoListenOnAssist). assistEpoch
+    // above still navigates to the voice screen either way, but only a fresh wakeEpoch (or an explicit mic tap)
+    // makes the voice screen start listening on its own — otherwise it lands on Idle and waits for a tap, so an
+    // accidental assist-gesture or app open doesn't record audio ("butt dials") unless the user asked for that.
     private var wakeEpoch by mutableStateOf(0)
 
     // True while the lock screen is up. Opened over it (wake word / assist gesture), the app shows only the voice
@@ -111,7 +112,7 @@ class MainActivity : ComponentActivity() {
             // listening. The lock-screen flags are per-instance, so they are re-applied either way.
             if (savedInstanceState == null) {
                 assistEpoch++
-                if (intent.getBooleanExtra(EXTRA_FROM_ASSIST, false)) wakeEpoch++
+                if (shouldAutoListen(intent)) wakeEpoch++
             }
             showOverLockScreen()
         }
@@ -119,7 +120,10 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) openRequestedConversation(intent)
         askForNotificationsOnce()
         lifecycleScope.launch {
-            SettingsStore(this@MainActivity).settings.collect { wakeInBackground = it.wakeBackground }
+            SettingsStore(this@MainActivity).settings.collect {
+                wakeInBackground = it.wakeBackground
+                autoListenOnAssist = it.autoListenOnAssist
+            }
         }
         ContextCompat.registerReceiver(
             this, lockStateReceiver,
@@ -213,7 +217,7 @@ class MainActivity : ComponentActivity() {
         openRequestedConversation(intent)
         if (isAssistIntent(intent)) {
             assistEpoch++
-            if (intent.getBooleanExtra(EXTRA_FROM_ASSIST, false)) wakeEpoch++
+            if (shouldAutoListen(intent)) wakeEpoch++
             showOverLockScreen()
         }
     }
@@ -251,6 +255,12 @@ class MainActivity : ComponentActivity() {
     // onStop can act on it immediately; the service can't be stopped from a coroutine that onDestroy may cancel.
     @Volatile private var wakeInBackground = true
 
+    // Settings → "Start listening on the assist gesture" (default off). Cached here (updated by the same
+    // collector as wakeInBackground) so isAssistIntent's synchronous check in onCreate/onNewIntent can read it
+    // without waiting on DataStore; on the very first cold start via the assist gesture the collector may not
+    // have loaded yet, so it falls back to the safe default (don't auto-listen).
+    @Volatile private var autoListenOnAssist = false
+
     override fun onStart() {
         super.onStart()
         RunWatcher.get(this).apply {
@@ -281,6 +291,11 @@ class MainActivity : ComponentActivity() {
     private fun isAssistIntent(i: Intent?): Boolean =
         i?.getBooleanExtra(EXTRA_FROM_ASSIST, false) == true ||
             i?.action == Intent.ACTION_ASSIST
+
+    /** A genuine wake-word launch always starts listening; a bare assist gesture only does when opted in. */
+    private fun shouldAutoListen(i: Intent?): Boolean =
+        i?.getBooleanExtra(EXTRA_FROM_ASSIST, false) == true ||
+            (i?.action == Intent.ACTION_ASSIST && autoListenOnAssist)
 
     companion object {
         const val EXTRA_FROM_ASSIST = "from_assist"
