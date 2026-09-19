@@ -186,7 +186,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Check reachability before committing to a listen: otherwise being off the right network (e.g. away
             // from home wifi) only surfaces after the mic recorded and STT transcribed, for nothing.
-            val reachable = HermesClient(s.baseUrl, s.apiKey).isReachable()
+            val reachable = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).isReachable()
             if (turn != myTurn) return@launch
             if (!reachable) {
                 error.value = "No connection to Hermes. Check your wifi, or set up a VPN/tunnel to reach it from outside your network."
@@ -360,7 +360,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val requestHistory = repo.historyForRequest()
 
         val s = settings ?: return
-        val client = HermesClient(s.baseUrl, s.apiKey)
+        val client = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess)
         val convId = repo.activeConversationId
         val request = HermesClient.TurnRequest(
             requestHistory, s.model, s.provider, repo.sessionId, systemPromptFor(s), s.thinking, s.useRuns,
@@ -709,7 +709,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             val head = "Deliver the message below to the user. Reply with exactly that text and nothing else: do not add, " +
                 "change, summarize or comment on it, and do not use any tools.\n\n"
             val body = if (head.length + text.length <= MAX_JOB_PROMPT) text else text.take(MAX_JOB_PROMPT - head.length - 1) + "…"
-            HermesClient(s.baseUrl, s.apiKey).createBackgroundJob("Jarvis: answer", head + body, target)
+            HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).createBackgroundJob("Jarvis: answer", head + body, target)
                 .onSuccess { deliveryNotice.value = "Sent to your $target." }
                 .onFailure { deliveryNotice.value = "Couldn’t send to $target: ${it.message}" }
         }

@@ -120,6 +120,11 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
+    // Cloudflare Access Service Token — an optional outer auth layer for a Hermes exposed through a Cloudflare
+    // Tunnel behind Cloudflare Access. Continues using baseUrl above; no separate Cloudflare URL.
+    var cfAccessEnabled by remember { mutableStateOf(false) }
+    var cfClientId by remember { mutableStateOf("") }
+    var cfClientSecret by remember { mutableStateOf("") }
     var model by remember { mutableStateOf(SettingsStore.DEFAULT_MODEL) }
     // The model names Hermes itself offers (GET /v1/models), for the picker under Model.
     var hermesModels by remember { mutableStateOf<List<ModelEntry>>(emptyList()) }
@@ -211,6 +216,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     suspend fun persist() {
         store.updateConnection(baseUrl, apiKey, model, provider)
+        store.updateCloudflareAccess(cfAccessEnabled, cfClientId, cfClientSecret)
         store.updateVoice(elevenKey, elevenVoice)
         store.updateVoicePrompt(voicePrompt)
         store.updateDeliverTarget(deliverTarget)
@@ -287,6 +293,9 @@ fun SettingsScreen(onBack: () -> Unit) {
         val s = store.settings.first()
         baseUrl = s.baseUrl
         apiKey = s.apiKey
+        cfAccessEnabled = s.cloudflareAccess.enabled
+        cfClientId = s.cloudflareAccess.clientId
+        cfClientSecret = s.cloudflareAccess.clientSecret
         model = s.model
         provider = s.provider
         assistantName = s.assistantName
@@ -313,7 +322,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         wakeCustomName = s.wakeCustomName
         // With a connection already saved, offer Hermes's model names without waiting for "Save & test".
         if (s.isConfigured) {
-            val hermes = HermesClient(s.baseUrl, s.apiKey)
+            val hermes = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess)
             hermesModels = hermes.fetchModels().getOrDefault(emptyList())
             modelOptions = hermes.fetchModelOptions().getOrNull()
         }
@@ -464,6 +473,75 @@ fun SettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     colors = textFieldColors,
                 )
+
+                Text(
+                    "Cloudflare Access",
+                    fontFamily = SpaceGrotesk,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    color = JarvisColors.TextPrimary,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Use Cloudflare Access",
+                            fontFamily = DmSans,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 15.sp,
+                            color = JarvisColors.TextPrimary,
+                        )
+                        Text(
+                            "Authenticate Hermes requests through Cloudflare Zero Trust. This allows connecting to a " +
+                                "Hermes server protected by Cloudflare Access without using WARP.",
+                            fontFamily = DmSans,
+                            fontSize = 12.sp,
+                            color = JarvisColors.Muted,
+                        )
+                    }
+                    Switch(
+                        checked = cfAccessEnabled,
+                        onCheckedChange = { cfAccessEnabled = it; status = null },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = JarvisColors.Cyan,
+                            checkedTrackColor = JarvisColors.Cyan.copy(alpha = 0.3f),
+                            uncheckedThumbColor = JarvisColors.Muted,
+                            uncheckedTrackColor = JarvisColors.Muted.copy(alpha = 0.2f),
+                        ),
+                    )
+                }
+                if (cfAccessEnabled) {
+                    OutlinedTextField(
+                        value = cfClientId,
+                        onValueChange = { cfClientId = it; status = null },
+                        label = { Text("Client ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = textFieldColors,
+                    )
+                    Text(
+                        "Cloudflare Access Service Token Client ID",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Muted,
+                    )
+                    OutlinedTextField(
+                        value = cfClientSecret,
+                        onValueChange = { cfClientSecret = it; status = null },
+                        label = { Text("Client Secret") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = textFieldColors,
+                    )
+                    Text(
+                        "Cloudflare Access Service Token Client Secret",
+                        fontFamily = DmSans,
+                        fontSize = 12.sp,
+                        color = JarvisColors.Muted,
+                    )
+                }
+
                 val pickerRows = pickerRows(modelOptions, hermesModels)
                 ExposedDropdownMenuBox(
                     expanded = modelMenu && pickerRows.isNotEmpty(),
@@ -683,22 +761,30 @@ fun SettingsScreen(onBack: () -> Unit) {
                 PillButton(
                     text = "Save & test connection",
                     onClick = {
-                        scope.launch {
-                            persist()
-                            testing = true
-                            status = "Testing\u2026"
-                            val s = store.settings.first()
-                            val result = HermesClient(s.baseUrl, s.apiKey).fetchModels()
-                            testing = false
-                            result.onSuccess { hermesModels = it }
-                            modelOptions = HermesClient(s.baseUrl, s.apiKey).fetchModelOptions().getOrNull()
-                            status = result.fold(
-                                onSuccess = { models ->
-                                    "\u2713 Connected. ${models.size} model(s)" +
-                                        if (models.isNotEmpty()) ": ${models.take(5).joinToString { it.id }}" else ""
-                                },
-                                onFailure = { "\u2717 ${it.message}" },
-                            )
+                        // Cloudflare Access on with a blank Client ID/Secret would silently send no CF-Access-* headers
+                        // at all (HermesClient.isReachable/fetchModels only add them once both are non-blank) \u2014 catch
+                        // that here instead, so it's a clear error rather than a connection test that quietly skips
+                        // the auth the user just turned on.
+                        if (cfAccessEnabled && (cfClientId.isBlank() || cfClientSecret.isBlank())) {
+                            status = "\u2717 Cloudflare Access is on, but Client ID and Client Secret can\u2019t be empty."
+                        } else {
+                            scope.launch {
+                                persist()
+                                testing = true
+                                status = "Testing\u2026"
+                                val s = store.settings.first()
+                                val result = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).fetchModels()
+                                testing = false
+                                result.onSuccess { hermesModels = it }
+                                modelOptions = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).fetchModelOptions().getOrNull()
+                                status = result.fold(
+                                    onSuccess = { models ->
+                                        "\u2713 Connected. ${models.size} model(s)" +
+                                            if (models.isNotEmpty()) ": ${models.take(5).joinToString { it.id }}" else ""
+                                    },
+                                    onFailure = { "\u2717 ${it.message}" },
+                                )
+                            }
                         }
                     },
                     accent = true,

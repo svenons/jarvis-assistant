@@ -95,7 +95,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val convId = repo.activeConversationId
             var gotText = false
 
-            val client = HermesClient(s.baseUrl, s.apiKey)
+            val client = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess)
             val request = HermesClient.TurnRequest(history, s.model, s.provider, repo.sessionId, null, s.thinking, s.useRuns)
             turn = client.sendTurn(request, object : HermesClient.StreamCallbacks {
                 override fun onDelta(textDelta: String) = onMain {
@@ -178,7 +178,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             repo.persistAsync()
             val name = "Jarvis: " + task.replace(Regex("\\s+"), " ").take(80)
-            HermesClient(s.baseUrl, s.apiKey).createBackgroundJob(name, prompt, target)
+            HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).createBackgroundJob(name, prompt, target)
                 .onSuccess { id ->
                     val step = "job-$id"
                     repo.addToolMessage(step, toolLine("\uD83D\uDCE8", "background", "Sent as a background task. The answer goes to your $target home channel."))

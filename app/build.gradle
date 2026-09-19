@@ -145,6 +145,10 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0'
     implementation 'androidx.datastore:datastore-preferences:1.0.0'
+    // Keystore-backed encrypted storage for the Cloudflare Access Service Token client secret (Settings ->
+    // Cloudflare Access) — the rest of Settings uses plain DataStore, but that secret is explicitly sensitive
+    // and this is the project's only mechanism for encrypted-at-rest storage.
+    implementation 'androidx.security:security-crypto:1.0.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'com.squareup.okhttp3:okhttp-sse:4.12.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2'
