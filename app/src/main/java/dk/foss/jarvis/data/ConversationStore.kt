@@ -1,6 +1,7 @@
 package dk.foss.jarvis.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -12,7 +13,8 @@ class ConversationStore(context: Context) {
     private val dir = File(context.applicationContext.filesDir, "conversations").apply { mkdirs() }
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    suspend fun save(conversation: Conversation) = withContext(Dispatchers.IO) {
+    /** Returns false (and logs why) if the conversation couldn't be written, so the caller can retry. */
+    suspend fun save(conversation: Conversation): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             // Write to a temp file then atomically rename, so concurrent/torn writes
             // can't corrupt the JSON.
@@ -22,8 +24,7 @@ class ConversationStore(context: Context) {
             if (!tmp.renameTo(target)) {
                 target.writeText(tmp.readText()); tmp.delete()
             }
-        }
-        Unit
+        }.onFailure { Log.e("ConversationStore", "saving ${conversation.id} failed", it) }.isSuccess
     }
 
     suspend fun load(id: String): Conversation? = withContext(Dispatchers.IO) {
@@ -37,13 +38,21 @@ class ConversationStore(context: Context) {
         Unit
     }
 
+    /** Conversations with a run still going: (conversation id, run). Read at startup to resume collecting them. */
+    suspend fun pendingRuns(): List<Pair<String, PendingRun>> = withContext(Dispatchers.IO) {
+        (dir.listFiles { f -> f.extension == "json" } ?: emptyArray()).mapNotNull { f ->
+            runCatching { json.decodeFromString(Conversation.serializer(), f.readText()) }.getOrNull()
+                ?.pendingRun?.let { f.nameWithoutExtension to it }
+        }
+    }
+
     /** All conversations as lightweight metadata, newest first. */
     suspend fun list(): List<ConversationMeta> = withContext(Dispatchers.IO) {
         (dir.listFiles { f -> f.extension == "json" } ?: emptyArray())
             .mapNotNull { f ->
                 runCatching {
                     val c = json.decodeFromString(Conversation.serializer(), f.readText())
-                    ConversationMeta(c.id, c.title, c.updatedAt, c.messages.size)
+                    ConversationMeta(c.id, c.title, c.updatedAt, c.messages.count { !UiMessage.isAnnotation(it.role) })
                 }.getOrNull()
             }
             .sortedByDescending { it.updatedAt }

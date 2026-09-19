@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -60,7 +62,18 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
 @Composable
-fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: () -> Unit) {
+fun ConversationScreen(
+    vm: ConversationViewModel,
+    /** Bumped only by a genuine wake-word detection; drives re-listening while this screen is already open. */
+    wakeTrigger: Int,
+    /** Whether this particular entry to the screen should start listening on its own (wake word or an explicit
+     * mic tap) rather than landing on Idle and waiting for a tap — avoids "butt dials" from a bare app open or
+     * assist gesture. */
+    autoListen: Boolean,
+    /** Show the system unlock prompt (fingerprint / PIN); calls back with whether the phone got unlocked. */
+    onRequestUnlock: ((Boolean) -> Unit) -> Unit,
+    onExit: () -> Unit,
+) {
     val context = LocalContext.current
     val state by vm.state
     val transcript by vm.transcript
@@ -69,6 +82,10 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val hint by vm.hint
     val working by vm.working
     val stalled by vm.stalled
+    val tools = vm.tools
+    val ttsNotice by vm.ttsNotice
+    val locked by vm.locked
+    val unlockRequested by vm.unlockRequested
 
     val segments = vm.segments
     val speakingIndex by vm.speakingIndex
@@ -90,19 +107,27 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
 
     LaunchedEffect(Unit) {
         vm.resetView()
-        if (!hasPermission) {
-            permLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else {
-            vm.startListening()
+        if (autoListen) {
+            if (!hasPermission) {
+                permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                vm.startListening()
+            }
         }
     }
-    var lastTrigger by remember { mutableStateOf(assistTrigger) }
-    LaunchedEffect(assistTrigger) {
-        if (assistTrigger != lastTrigger) {
-            lastTrigger = assistTrigger
+    var lastTrigger by remember { mutableStateOf(wakeTrigger) }
+    LaunchedEffect(wakeTrigger) {
+        if (wakeTrigger != lastTrigger) {
+            lastTrigger = wakeTrigger
             if (hasPermission && state == ConvState.Idle) {
                 vm.startListening(fromWake = true)
             }
+        }
+    }
+    LaunchedEffect(unlockRequested) {
+        if (unlockRequested) {
+            vm.unlockRequested.value = false
+            onRequestUnlock { unlocked -> vm.onUnlockResult(unlocked) }
         }
     }
     LaunchedEffect(speakingIndex) {
@@ -113,7 +138,8 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) vm.stopAll()
+            // The unlock prompt can stop the activity briefly; that isn't leaving the conversation.
+            if (event == Lifecycle.Event.ON_STOP && !vm.unlockInFlight) vm.stopAll()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -126,6 +152,12 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
 
     DeepSpaceBackground(active = isActive) {
         Box(Modifier.fillMaxSize().statusBarsPadding().padding(20.dp)) {
+            if (locked) {
+                Box(Modifier.align(Alignment.TopStart).padding(top = 12.dp)) {
+                    StatusTag("LOCKED", JarvisColors.ErrorOrange)
+                }
+            }
+
             // Top-right close button
             IconButton(
                 onClick = onExit,
@@ -168,20 +200,25 @@ fun ConversationScreen(vm: ConversationViewModel, assistTrigger: Int, onExit: ()
                     ConvState.Thinking -> ThinkingContent(
                         transcript = transcript,
                         stalled = stalled,
+                        tools = tools,
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
+                        onStop = { vm.onStopTap() },
                     )
                     ConvState.Speaking -> SpeakingContent(
                         segments = segments,
                         speakingIndex = speakingIndex,
                         pendingText = pendingText,
                         listState = listState,
+                        tools = tools,
+                        notice = ttsNotice,
                         onMicTap = {
                             if (hasPermission) vm.onMicTap()
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
+                        onStop = { vm.onStopTap() },
                     )
                 }
             }
@@ -199,7 +236,8 @@ private fun IdleContent(hasPermission: Boolean, hint: String?, onMicTap: () -> U
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            StatusTag("WAKE WORD ACTIVE", JarvisColors.Cyan)
+            // Only when the wake word is on in Settings (Branding.wakePhrase is null otherwise).
+            if (LocalBranding.current.wakePhrase != null) StatusTag("WAKE WORD ACTIVE", JarvisColors.Cyan)
 
             // Glowing mic button with pulse ring
             Box(contentAlignment = Alignment.Center) {
@@ -297,8 +335,9 @@ private fun IdleContent(hasPermission: Boolean, hint: String?, onMicTap: () -> U
                     )
                 }
             } else {
+                val wakePhrase = LocalBranding.current.wakePhrase
                 Text(
-                    text = "Tap, or say \"Hey Jarvis\"",
+                    text = if (wakePhrase != null) "Tap, or say \u201C$wakePhrase\u201D" else "Tap to talk",
                     fontFamily = DmSans,
                     fontWeight = FontWeight.Normal,
                     fontSize = 14.sp,
@@ -370,7 +409,7 @@ private fun ListeningContent(transcript: String, onMicTap: () -> Unit) {
 }
 
 @Composable
-private fun ThinkingContent(transcript: String, stalled: Boolean, onMicTap: () -> Unit) {
+private fun ThinkingContent(transcript: String, stalled: Boolean, tools: List<ToolStep>, onMicTap: () -> Unit, onStop: () -> Unit) {
     // Blinking dots
     val transition = rememberInfiniteTransition(label = "blink")
     val dot1 by transition.animateFloat(
@@ -443,9 +482,15 @@ private fun ThinkingContent(transcript: String, stalled: Boolean, onMicTap: () -
                     Box(Modifier.size(6.dp).alpha(dot3).background(JarvisColors.ThinkBlue, CircleShape))
                 }
             }
+
+            if (tools.isNotEmpty()) {
+                Spacer(Modifier.height(24.dp))
+                ToolActivity(tools, Modifier.fillMaxWidth().padding(horizontal = 24.dp))
+            }
         }
 
-        MicFab(
+        VoiceControls(
+            onStop = onStop,
             onMicTap = onMicTap,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -460,7 +505,10 @@ private fun SpeakingContent(
     speakingIndex: Int,
     pendingText: String,
     listState: androidx.compose.foundation.lazy.LazyListState,
+    tools: List<ToolStep>,
+    notice: String?,
     onMicTap: () -> Unit,
+    onStop: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
         Column(
@@ -479,6 +527,23 @@ private fun SpeakingContent(
             Spacer(Modifier.height(8.dp))
 
             StatusTag("SPEAKING", JarvisColors.Cyan)
+
+            notice?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = it,
+                    fontFamily = DmSans,
+                    fontSize = 13.sp,
+                    color = JarvisColors.ErrorOrange,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                )
+            }
+
+            if (tools.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                ToolActivity(tools, Modifier.fillMaxWidth().padding(horizontal = 8.dp), maxRows = 3)
+            }
 
             Spacer(Modifier.height(16.dp))
 
@@ -524,12 +589,43 @@ private fun SpeakingContent(
             }
         }
 
-        MicFab(
+        VoiceControls(
+            onStop = onStop,
             onMicTap = onMicTap,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 24.dp),
         )
+    }
+}
+
+/**
+ * Bottom controls while Hermes is thinking or speaking. Stop ends the turn and goes idle (no listening), which is what
+ * cancelling should do; the mic is for talking over it: it ends the turn and listens.
+ */
+@Composable
+private fun VoiceControls(onStop: () -> Unit, onMicTap: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(32.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(JarvisColors.GlassBg)
+                    .border(1.dp, JarvisColors.Cyan.copy(alpha = 0.4f), CircleShape)
+                    .clickable { onStop() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(28.dp), tint = JarvisColors.TextPrimary)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("Stop", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.TextSecondary)
+        }
+        MicFab(onMicTap = onMicTap)
     }
 }
 
@@ -637,7 +733,7 @@ private fun ErrorLayout(
             }
 
             Text(
-                text = "Can't reach Jarvis",
+                text = "Can't reach ${LocalBranding.current.name}",
                 fontFamily = SpaceGrotesk,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 21.sp,

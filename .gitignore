@@ -3,6 +3,7 @@
 *.aab
 build/
 .gradle/
+app/libs/
 local.properties
 .idea/
 *.iml
@@ -10,6 +11,7 @@ local.properties
 
 # Secrets
 *.keystore
+!app/debug.keystore
 secrets.properties
 keys.properties
 

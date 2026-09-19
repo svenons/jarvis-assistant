@@ -14,6 +14,15 @@ def defBaseUrl = jvEscape(keysProps.getProperty("JARVIS_BASE_URL", ""))
 def defApiKey = jvEscape(keysProps.getProperty("JARVIS_API_KEY", ""))
 def defElevenKey = jvEscape(keysProps.getProperty("JARVIS_ELEVEN_KEY", ""))
 def defElevenVoice = jvEscape(keysProps.getProperty("JARVIS_ELEVEN_VOICE", ""))
+// The assistant's name. It is the launcher / app-switcher / assistant-picker label (fixed at install
+// time by Android) and the default for the in-app name, which Settings can override at runtime.
+def appName = keysProps.getProperty("JARVIS_APP_NAME", "").trim() ?: "Jarvis"
+// AGP already XML-escapes resValue (& and <), but aapt still parses Android string escapes: backslash
+// before quotes/apostrophes, and before a leading @ or ? (which would read as a resource reference).
+def resEscape = { String s ->
+    def t = s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"")
+    (t.startsWith("@") || t.startsWith("?")) ? "\\" + t : t
+}
 
 android {
     namespace 'dk.foss.jarvis'
@@ -23,8 +32,10 @@ android {
         applicationId "dk.foss.jarvis"
         minSdk 29
         targetSdk 34
-        versionCode 1
-        versionName "0.1.0"
+        // CI passes the real version (-PappVersionName=1.2.3 -PappVersionCode=1002003); see
+        // .github/scripts/next-version.sh. These defaults are what a local build gets.
+        versionCode((project.findProperty("appVersionCode") ?: "1") as int)
+        versionName(project.findProperty("appVersionName") ?: "0.1.0")
         vectorDrawables {
             useSupportLibrary true
         }
@@ -36,6 +47,22 @@ android {
         buildConfigField "String", "DEFAULT_API_KEY", "\"${defApiKey}\""
         buildConfigField "String", "DEFAULT_ELEVEN_KEY", "\"${defElevenKey}\""
         buildConfigField "String", "DEFAULT_ELEVEN_VOICE", "\"${defElevenVoice}\""
+        buildConfigField "String", "DEFAULT_ASSISTANT_NAME", "\"${jvEscape(appName)}\""
+        resValue "string", "app_name", resEscape(appName)
+    }
+
+    signingConfigs {
+        // Every debug build, local or CI, is signed with this committed key (the standard auto-generated
+        // Android debug key, copied from the maintainer's ~/.android/debug.keystore), so a release installs
+        // over a local build and over the previous release instead of failing with a signature mismatch.
+        // A debug key is public by design ("android" / "androiddebugkey"): it protects nothing, so never
+        // reuse it for anything real.
+        debug {
+            storeFile file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
     }
 
     buildTypes {
@@ -67,6 +94,42 @@ android {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
+        jniLibs {
+            // ARM-only (see abiFilters). The sherpa AAR ships an x86 libonnxruntime.so that
+            // collides with onnxruntime-android's; the ARM libs don't collide, so drop x86.
+            excludes += ['lib/x86/**', 'lib/x86_64/**']
+        }
+    }
+}
+
+// sherpa-onnx (on-device speech recognition). We use the official *static-link* AAR: it
+// bundles ONNX Runtime inside libsherpa-onnx-jni.so, so it can't clash with the separate
+// libonnxruntime.so that xyz.rementia:openwakeword brings in. It's 38 MB, so it is fetched
+// at build time into app/libs (gitignored) and checked against a pinned SHA-256.
+def sherpaVersion = '1.13.8'
+def sherpaSha256 = 'b22c3fc1b6a45666d28892bb2f7694beeb77a8362d7ebd77c1a5431ec9435471'
+def sherpaAar = file("libs/sherpa-onnx-static-link-onnxruntime-${sherpaVersion}.aar")
+def sha256Of = { File f ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    f.withInputStream { s ->
+        byte[] buf = new byte[65536]
+        int n
+        while ((n = s.read(buf)) > 0) md.update(buf, 0, n)
+    }
+    md.digest().collect { String.format('%02x', it) }.join()
+}
+tasks.register('fetchSherpaOnnx') {
+    outputs.file(sherpaAar)
+    doLast {
+        if (!sherpaAar.exists() || sha256Of(sherpaAar) != sherpaSha256) {
+            sherpaAar.parentFile.mkdirs()
+            def url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${sherpaVersion}/${sherpaAar.name}"
+            new URL(url).withInputStream { i -> sherpaAar.withOutputStream { o -> o << i } }
+            if (sha256Of(sherpaAar) != sherpaSha256) {
+                sherpaAar.delete()
+                throw new GradleException("Checksum mismatch for ${sherpaAar.name}; refusing to use it")
+            }
+        }
     }
 }
 
@@ -87,6 +150,11 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'xyz.rementia:openwakeword:0.1.5' // wake word (package com.rementia.openwakeword.lib)
+    // The wake library only exposes ONNX Runtime at runtime; CustomWakeEngine / WakeModels use its API
+    // directly, so compile against it too — same version the library resolves, so nothing else changes.
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.18.0'
+    implementation(files(sherpaAar) { builtBy 'fetchSherpaOnnx' }) // on-device STT + TTS (package com.k2fsa.sherpa.onnx)
+    implementation 'org.apache.commons:commons-compress:1.28.0' // unpacks the .tar.bz2 TTS voice archives
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
 }

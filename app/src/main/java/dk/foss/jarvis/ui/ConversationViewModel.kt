@@ -1,17 +1,25 @@
 package dk.foss.jarvis.ui
 
 import android.app.Application
+import android.app.KeyguardManager
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dk.foss.jarvis.data.ConversationRepository
 import dk.foss.jarvis.data.JarvisSettings
+import dk.foss.jarvis.data.PendingRun
 import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.hermes.HermesClient
+import dk.foss.jarvis.run.RunWatcher
 import dk.foss.jarvis.voice.AndroidTts
 import dk.foss.jarvis.voice.ElevenLabsTts
+import dk.foss.jarvis.voice.LocalRecognizer
+import dk.foss.jarvis.voice.LocalTts
+import dk.foss.jarvis.voice.QueuedTts
 import dk.foss.jarvis.voice.ScribeRecognizer
 import dk.foss.jarvis.voice.SpeechInput
 import dk.foss.jarvis.voice.TtsEngine
@@ -19,7 +27,6 @@ import dk.foss.jarvis.voice.VoiceRecognizer
 import dk.foss.jarvis.wake.WakeWordService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import okhttp3.sse.EventSource
 
 enum class ConvState { Idle, Listening, Thinking, Speaking }
 
@@ -38,25 +45,50 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     val reply = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
     val hint = mutableStateOf<String?>(null)
+    /** Set when the voice couldn't speak a sentence, so it is never skipped silently. Cleared each turn. */
+    val ttsNotice = mutableStateOf<String?>(null)
+    /** The lock screen is up, so anything that changes something needs the phone unlocked first. */
+    val locked = mutableStateOf(false)
+    // Opened over the lock screen: the first turn starts a fresh conversation, so nothing from earlier chats is sent.
+    private var freshConversation = false
+    /** Set when the screen should show the system unlock prompt (fingerprint / PIN); the screen clears it. */
+    val unlockRequested = mutableStateOf(false)
+    /** True from asking for the unlock until its result comes back; the screen doesn't stop the conversation meanwhile. */
+    var unlockInFlight = false
+        private set
+    // Hermes asks for an unlock by ending its reply with UNLOCK_MARKER; the filter strips it from what is shown/spoken.
+    private var unlockFilter = MarkerFilter(UNLOCK_MARKER)
+    private var unlockNeeded = false
     val working = mutableStateOf(false) // Hermes stream still open (response not complete)
     val stalled = mutableStateOf(false) // content paused mid-stream — likely running a tool
+    /** Tools the agent ran this turn (from `hermes.tool.progress`) — display only, never spoken. */
+    val tools = androidx.compose.runtime.mutableStateListOf<ToolStep>()
 
     // --- follow-along reply display state ---
     val segments = androidx.compose.runtime.mutableStateListOf<String>()
     val speakingIndex = mutableStateOf(-1)
     val pendingText = mutableStateOf("")
     private var spokenCount = 0
+    // Index of this turn's reply in the shared conversation, or -1 before its first word. The reply is
+    // written there as it streams (not when the stream ends), so a turn cut short by a tap, the screen
+    // locking or leaving the screen still keeps whatever was said.
+    private var assistantIndex = -1
 
     private var settings: JarvisSettings? = null
     private var tts: TtsEngine? = null
     private var androidFallback: AndroidTts? = null
-    private var source: EventSource? = null
+    private var builtTtsChoice: String? = null // which voice `tts` was built for
+    private var turnHandle: HermesClient.TurnHandle? = null
+    private val watcher = RunWatcher.get(app)
+    private var gotReplyText = false // some reply text was shown this turn (else the run's final output is)
     private var continuous = true
 
     // --- streaming-TTS pipeline ---
     private val sentenceBuffer = StringBuilder()
     private val ttsQueue = ArrayDeque<String>()
     private var speaking = false
+    private var pendingSpeech = 0 // sentences handed to a queueing voice that haven't finished playing
+    private var ttsFailures = 0
     private var streamDone = false
     private var turn = 0 // bumped each turn; stale async callbacks check this and bail
     private var retriedThisTurn = false
@@ -80,26 +112,41 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun ensureReady() {
-        val s = settings ?: settingsStore.settings.first().also { settings = it }
-        if (tts == null) {
-            tts = if (s.useElevenLabs) {
-                ElevenLabsTts(getApplication(), s.elevenKey, s.elevenVoiceId)
-            } else {
-                AndroidTts(getApplication(), languageTag = null)
-            }
+        // stopAll() drops the recognizer, so a null one marks the start of a conversation:
+        // re-read settings then, so changes made in Settings apply without an app restart.
+        val s = settings.takeIf { recognizer != null }
+            ?: settingsStore.settings.first().also { settings = it }
+
+        // Rebuild the voice if the choice changed since it was built (nothing is speaking here).
+        val ttsChoice = when {
+            s.useLocalTts -> "local:${s.localTtsModel}" // explicit on-device choice: never a cloud voice
+            s.useElevenLabs -> "eleven:${s.elevenKey}:${s.elevenVoiceId}"
+            else -> "android"
         }
+        if (tts == null || ttsChoice != builtTtsChoice) {
+            tts?.shutdown()
+            tts = when {
+                s.useLocalTts -> LocalTts(getApplication(), s.localTtsModel)
+                s.useElevenLabs -> ElevenLabsTts(getApplication(), s.elevenKey, s.elevenVoiceId)
+                else -> AndroidTts(getApplication(), languageTag = null)
+            }
+            builtTtsChoice = ttsChoice
+        }
+
         if (recognizer == null) {
-            // With an ElevenLabs key, use Scribe (far better accuracy); else on-device.
-            recognizer = if (s.useElevenLabs) {
-                ScribeRecognizer(getApplication(), s.elevenKey, languageCode = null)
-            } else {
-                SpeechInput(getApplication())
+            recognizer = when {
+                // Explicit choice: never fall back to a cloud STT (a missing model is reported instead).
+                s.useLocalStt -> LocalRecognizer(getApplication(), s.localSttModel)
+                // With an ElevenLabs key, use Scribe (far better accuracy); else Android's recognizer.
+                s.useElevenLabs -> ScribeRecognizer(getApplication(), s.elevenKey, languageCode = null)
+                else -> SpeechInput(getApplication())
             }
             recognizer?.prewarm()
         }
     }
 
-    fun startListening(fromWake: Boolean = false) {
+    /** Set up a turn that keeps the conversation going and owns the mic (or speaker) until it ends. */
+    private fun claimTurn(fromWake: Boolean) {
         // A conversation auto-continues: after Jarvis speaks it listens again.
         continuous = true
         retriedThisTurn = false
@@ -108,6 +155,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         // any pending re-arm so the wake engine doesn't grab the mic mid-capture.
         main.removeCallbacks(rearmWake)
         WakeWordService.pauseListening()
+    }
+
+    fun startListening(fromWake: Boolean = false) {
+        claimTurn(fromWake)
         viewModelScope.launch {
             ensureReady()
             if (settings?.isConfigured != true) {
@@ -115,27 +166,81 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 state.value = ConvState.Idle
                 return@launch
             }
+            if (repo.pendingRun != null && turnHandle == null) {
+                // An earlier request is still running with nobody listening; a new one would only queue behind it.
+                hint.value = "Hermes is still working on your last request in the background."
+                state.value = ConvState.Idle
+                return@launch
+            }
+            if (freshConversation) {
+                freshConversation = false
+                repo.persist() // keep the earlier conversation in History, then start clean
+                repo.startNew()
+            }
             beginTurn()
             state.value = ConvState.Listening
             startRecognition()
         }
     }
 
+    /** Close out the current reply (finished or cut off) and save the conversation. */
+    private fun endReply() {
+        assistantIndex = -1
+        repo.persistAsync() // a no-op when nothing changed since the last save
+    }
+
+    /** A new turn starts while the previous one is still running (you interrupted it): that really cancels it. */
+    private fun stopTurn() {
+        val h = turnHandle ?: return
+        turnHandle = null
+        val runId = repo.pendingRun?.runId
+        h.stop()
+        if (runId != null) {
+            watcher.stop(runId)
+            repo.updatePendingRun(null)
+        }
+    }
+
+    /**
+     * Stop listening (screen closed, app left). A run keeps going on the server: [RunWatcher] collects its answer
+     * into the conversation and notifies. On the old chat-stream fallback this simply ends the stream.
+     */
+    private fun leaveTurn() {
+        val h = turnHandle ?: return
+        turnHandle = null
+        assistantIndex = -1
+        h.detach()
+        repo.pendingRun?.runId?.let { watcher.detach(it) }
+        repo.persistAsync()
+    }
+
+    /** The run ended while we were listening, so its answer is already in the conversation. */
+    private fun endRun() {
+        turnHandle = null
+        repo.pendingRun?.runId?.let { watcher.finish(it) }
+        repo.updatePendingRun(null)
+    }
+
     /** Start a fresh turn: invalidate in-flight callbacks and clear pipeline state. */
     private fun beginTurn() {
+        endReply() // a reply still streaming from the previous turn is kept, not dropped
         turn++
         main.removeCallbacks(idleFlush)
         main.removeCallbacks(stallIndicator)
         working.value = false
         stalled.value = false
+        tools.clear()
         // Stop any in-flight recognition so the next start isn't blocked by
         // AudioCapture's "if (active) return" guard (which silently drops it).
         runCatching { recognizer?.stop() }
-        source?.cancel(); source = null
+        stopTurn() // interrupting a turn that is still running cancels it
         runCatching { tts?.stop(); androidFallback?.stop() }
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
         speaking = false
+        pendingSpeech = 0
+        ttsFailures = 0
+        ttsNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -153,23 +258,27 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
      * across screen visits while the shared conversation may have been replaced).
      */
     fun resetView() {
+        endReply()
         turn++ // invalidate any in-flight callbacks from a prior screen visit
         main.removeCallbacks(rearmWake)
         emptyWakeTurns = 0
         currentTurnFromWake = false
         runCatching { recognizer?.stop() }
-        source?.cancel(); source = null
+        leaveTurn()
         transcript.value = ""
         reply.value = ""
         error.value = null
         hint.value = null
         working.value = false
         stalled.value = false
+        tools.clear()
         segments.clear()
         speakingIndex.value = -1
         pendingText.value = ""
         spokenCount = 0
         state.value = ConvState.Idle
+        locked.value = isPhoneLocked()
+        freshConversation = locked.value
     }
 
     private fun startRecognition() {
@@ -213,20 +322,70 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         state.value = ConvState.Thinking
         working.value = true
         main.postDelayed(stallIndicator, STALL_MS)
+        assistantIndex = -1
+        gotReplyText = false
+        unlockFilter = MarkerFilter(UNLOCK_MARKER)
+        unlockNeeded = false
         repo.addMessage("user", userText)
+        repo.persistAsync() // the utterance is saved now, not when the reply finishes
+        val turnStart = repo.messages.size // the turn's entries start right after the utterance
         val requestHistory = repo.historyForRequest()
 
         val s = settings ?: return
         val client = HermesClient(s.baseUrl, s.apiKey)
-        source = client.streamChat(requestHistory, s.model, repo.sessionId, object : HermesClient.StreamCallbacks {
+        val convId = repo.activeConversationId
+        val request = HermesClient.TurnRequest(
+            requestHistory, s.model, s.provider, repo.sessionId, systemPromptFor(s), s.thinking, s.useRuns,
+        )
+        turnHandle = client.sendTurn(request, object : HermesClient.StreamCallbacks {
             override fun onDelta(textDelta: String) = onMain {
-                if (turn == myTurn) onTextDelta(textDelta)
+                if (turn == myTurn) showReply(textDelta)
+            }
+
+            override fun onRunStarted(runId: String) = onMain {
+                // Not turn-guarded: even if we left meanwhile, the run exists and its result must be collected.
+                if (repo.activeConversationId != convId) return@onMain
+                val run = PendingRun(runId, System.currentTimeMillis())
+                repo.updatePendingRun(run)
+                repo.persistAsync()
+                watcher.begin(convId, runId, run.startedAt)
+                if (turn != myTurn || turnHandle == null) watcher.detach(runId)
+            }
+
+            override fun onFinalOutput(text: String) = onMain {
+                // Normally the text streamed already; show the final answer only if nothing did.
+                if (turn == myTurn && !gotReplyText && text.isNotBlank()) showReply(text)
+            }
+
+            override fun onStreamLost(message: String) = onMain {
+                if (turn != myTurn) return@onMain
+                // The connection dropped but the run goes on: the watcher collects it instead of failing the turn.
+                turnHandle = null
+                repo.pendingRun?.runId?.let { watcher.detach(it) }
+                beginTurn() // stops speech and clears the pipeline
+                hint.value = "Lost the connection. Hermes is still working; the answer will be added to the conversation."
+                goIdle()
+            }
+
+            override fun onToolProgress(id: String, tool: String, emoji: String, label: String, running: Boolean) = onMain {
+                if (turn != myTurn) return@onMain
+                tools.applyToolEvent(id, tool, emoji, label, running) // the live on-screen list
+                if (running) {
+                    // Also keep the step in the saved conversation. Text after a tool becomes a new reply
+                    // after it, so history reads in the order things happened.
+                    if (repo.addToolMessage(id, toolLine(emoji, tool, label)) >= 0) assistantIndex = -1
+                    stalled.value = true // a tool is running: say WORKING now, not after the stall timer
+                } else {
+                    repo.finishTool(id)
+                }
             }
 
             override fun onSessionId(id: String) { repo.setSessionId(id) }
 
             override fun onComplete() = onMain {
                 if (turn != myTurn) return@onMain
+                // Text held back as a possible marker start was ordinary text after all.
+                unlockFilter.finish().let { if (it.isNotEmpty()) onTextDelta(it) }
                 main.removeCallbacks(idleFlush)
                 main.removeCallbacks(stallIndicator)
                 working.value = false
@@ -236,10 +395,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 sentenceBuffer.setLength(0)
                 if (rest.isNotEmpty()) enqueueSpeech(rest)
                 pendingText.value = ""
-                if (reply.value.isNotBlank()) repo.addMessage("assistant", reply.value)
-                viewModelScope.launch { repo.persist() }
+                // The reply is already in the conversation (see onTextDelta); just close it out and save.
+                assistantIndex = -1
+                repo.persistAsync()
+                if (s.showReasoning) {
+                    val turnEnd = repo.messages.size
+                    viewModelScope.launch { TurnEnricher.addDetails(client, repo, turnStart, turnEnd) }
+                }
+                endRun()
                 streamDone = true
-                pump()
+                if (tts is QueuedTts) finishIfSpoken() else pump()
             }
 
             override fun onError(message: String) = onMain {
@@ -248,14 +413,44 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 working.value = false
                 stalled.value = false
                 error.value = message
+                endRun()
+                endReply() // keep any partial reply that arrived before the failure
                 goIdle()
             }
         })
     }
 
+    private fun isPhoneLocked(): Boolean =
+        (getApplication<Application>().getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
+
+    /**
+     * The voice-style instruction, plus (when the lock screen is up) the locked-phone instruction and how to ask for
+     * an unlock. The wording of the former is a setting; the latter is the app's own protocol, so it is always added.
+     * Re-sent every turn.
+     */
+    private fun systemPromptFor(s: JarvisSettings): String? {
+        val lockedNow = isPhoneLocked()
+        locked.value = lockedNow
+        val lockedText = if (lockedNow) s.lockedInstructions?.let { "$it\n\n$UNLOCK_PROTOCOL" } else null
+        return listOfNotNull(s.voiceInstructions, lockedText)
+            .joinToString("\n\n")
+            .ifBlank { null }
+    }
+
+    /** Reply text arrived (streamed, or a run's final answer): hide an unlock marker, then show and speak the rest. */
+    private fun showReply(text: String) {
+        val visible = unlockFilter.feed(text)
+        if (unlockFilter.found) unlockNeeded = true
+        if (visible.isNotEmpty()) {
+            gotReplyText = true
+            onTextDelta(visible)
+        }
+    }
+
     /** A token arrived: show it, and speak as soon as a full sentence is available. */
     private fun onTextDelta(delta: String) {
         reply.value += delta
+        assistantIndex = repo.streamReply(assistantIndex, delta)
         sentenceBuffer.append(delta)
         extractSentences()
         pendingText.value = sentenceBuffer.toString().trim()
@@ -289,7 +484,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     cut = i; break
                 }
             }
-            if (cut < 0 && s.length > 180) { // soft cap so one long clause still starts early
+            // Soft cap so one long clause still starts early. The FIRST piece of a reply is cut shorter: a voice
+            // synthesizes a whole sentence before playing it (so a failed one can be retried cleanly), and the wait
+            // before the first sound is that first piece's synthesis time.
+            val cap = if (segments.isEmpty()) FIRST_PIECE_MAX_CHARS else 180
+            if (cut < 0 && s.length > cap) {
                 val sp = s.lastIndexOf(' ')
                 if (sp > 40) cut = sp
             }
@@ -301,9 +500,55 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun enqueueSpeech(text: String) {
-        ttsQueue.addLast(text)
         segments.add(text)
+        val engine = tts
+        if (engine is QueuedTts) {
+            speakQueued(engine, text, segments.lastIndex)
+            return
+        }
+        ttsQueue.addLast(text)
         pump()
+    }
+
+    /**
+     * A voice that queues (the on-device ones) gets every sentence as soon as it exists, so it synthesizes the next
+     * while the current one plays. The one-at-a-time [pump] below is for voices that can't.
+     */
+    private fun speakQueued(engine: QueuedTts, text: String, index: Int) {
+        val myTurn = turn
+        pendingSpeech++
+        engine.enqueue(
+            text,
+            onStart = {
+                if (turn == myTurn) {
+                    speakingIndex.value = index
+                    if (state.value != ConvState.Speaking) state.value = ConvState.Speaking
+                }
+            },
+            onDone = { if (turn == myTurn) { pendingSpeech--; finishIfSpoken() } },
+            onError = { message ->
+                if (turn == myTurn) {
+                    pendingSpeech--
+                    reportSpeechFailure(text, message)
+                    finishIfSpoken()
+                }
+            },
+        )
+    }
+
+    /** The reply has streamed in and every queued sentence has played (or failed): the turn is over. */
+    private fun finishIfSpoken() {
+        if (streamDone && pendingSpeech <= 0 && ttsQueue.isEmpty()) finishTurn()
+    }
+
+    private fun reportSpeechFailure(text: String, message: String) {
+        Log.w("ConversationVM", "voice failed on \"${text.take(40)}\": $message")
+        ttsFailures++
+        ttsNotice.value = if (ttsFailures >= 2) {
+            "The voice keeps failing ($message). Try another one in Settings."
+        } else {
+            "Couldn\u2019t speak one sentence: $message"
+        }
     }
 
     /** Speak queued sentences one after another (the next synthesizes after the prior plays). */
@@ -341,7 +586,44 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun finishTurn() {
+        // Hermes said the request needs the phone unlocked (and has now finished saying so): ask for it, then
+        // carry on from onUnlockResult. Only meaningful while actually locked.
+        val askUnlock = unlockNeeded && isPhoneLocked()
+        unlockNeeded = false
+        if (askUnlock) { askToUnlock(); return }
         if (continuous) startListening() else goIdle()
+    }
+
+    private fun askToUnlock() {
+        state.value = ConvState.Idle // not goIdle(): nothing should re-arm the wake word behind the unlock prompt
+        hint.value = "Unlock your phone to continue"
+        unlockInFlight = true
+        unlockRequested.value = true
+    }
+
+    /** The system unlock prompt (fingerprint / PIN) finished. On success the request is sent again, now unlocked. */
+    fun onUnlockResult(unlocked: Boolean) {
+        if (!unlockInFlight) return
+        unlockInFlight = false
+        locked.value = isPhoneLocked()
+        if (unlocked) {
+            continueAfterUnlock()
+        } else {
+            // Don't start the mic on our own here: the user may have backed out of the app.
+            hint.value = "Still locked. Tap the mic to keep talking."
+            goIdle()
+        }
+    }
+
+    /** Tell Hermes the phone is unlocked so it carries out what it held back. The conversation carries on after. */
+    private fun continueAfterUnlock() {
+        claimTurn(fromWake = false)
+        viewModelScope.launch {
+            ensureReady()
+            beginTurn()
+            transcript.value = UNLOCKED_FOLLOW_UP
+            think(UNLOCKED_FOLLOW_UP)
+        }
     }
 
     /**
@@ -371,6 +653,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         return androidFallback
     }
 
+    /**
+     * Stop button (Thinking or Speaking): end the turn and go idle, without listening. A run still going on the server is
+     * cancelled for good; the partial reply that was already shown stays in the conversation.
+     */
+    fun onStopTap() {
+        currentTurnFromWake = false
+        beginTurn() // invalidates callbacks, stops the run (stopTurn), speech and the pipeline
+        goIdle()
+    }
+
     fun onMicTap() {
         when (state.value) {
             ConvState.Listening -> { turn++; recognizer?.stop(); goIdle() }
@@ -380,6 +672,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopAll() {
         continuous = false
+        unlockInFlight = false // a late unlock result belongs to a screen that is gone
+        unlockRequested.value = false
+        unlockNeeded = false
+        assistantIndex = -1 // the persistAsync() below saves the partial reply already in the conversation
         turn++
         emptyWakeTurns = 0
         main.removeCallbacks(idleFlush)
@@ -387,13 +683,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         main.removeCallbacks(rearmWake)
         working.value = false
         stalled.value = false
+        tools.clear()
         recognizer?.release()
         recognizer = null
         runCatching { tts?.stop(); androidFallback?.stop() }
-        source?.cancel(); source = null
+        leaveTurn() // leaving the screen doesn't kill a turn that is already running
         ttsQueue.clear()
         sentenceBuffer.setLength(0)
         speaking = false
+        pendingSpeech = 0
+        ttsNotice.value = null
         streamDone = false
         segments.clear()
         speakingIndex.value = -1
@@ -408,11 +707,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        assistantIndex = -1
         main.removeCallbacks(idleFlush)
         main.removeCallbacks(stallIndicator)
         main.removeCallbacks(rearmWake)
         recognizer?.release()
-        source?.cancel()
+        leaveTurn()
         tts?.shutdown()
         androidFallback?.shutdown()
         repo.persistAsync()
@@ -421,6 +721,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        /** Hermes ends a reply with this when the request needs the phone unlocked; the app strips it and prompts. */
+        const val UNLOCK_MARKER = "[[UNLOCK]]"
+        const val UNLOCK_PROTOCOL =
+            "When something needs the phone unlocked, say so in one short sentence and end your reply with the exact " +
+                "text $UNLOCK_MARKER. The app then asks the user to unlock with their fingerprint or PIN and tells you " +
+                "when they have; do not carry out the request until then. Never write $UNLOCK_MARKER for any other reason."
+        const val UNLOCKED_FOLLOW_UP = "I've unlocked the phone. Go ahead with what I asked."
+        const val FIRST_PIECE_MAX_CHARS = 90
         const val IDLE_FLUSH_MS = 350L
         const val STALL_MS = 800L
         const val WAKE_REARM_DELAY_MS = 1200L

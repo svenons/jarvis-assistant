@@ -7,15 +7,19 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.RandomAccessFile
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
  * Records mic audio to a 16 kHz mono WAV with energy-based voice-activity
  * detection: it waits for speech, then stops after a short trailing silence.
- * Callbacks are delivered on the main thread.
+ * "Speech" is anything clearly above the room's own background level (learned while
+ * waiting), so normal talking at arm's length works; quiet speech is then boosted
+ * before it is handed on. Callbacks are delivered on the main thread.
  */
 class AudioCapture(private val context: Context) {
 
@@ -56,6 +60,11 @@ class AudioCapture(private val context: Context) {
                 var preRollMs = 0
                 record.startRecording()
 
+                // Ambient level = the quietest recent frame before speech begins (minimum statistics).
+                val ambient = ArrayDeque<Double>()
+                var noise = 0.0
+                var frameIndex = 0
+                val speechLevels = ArrayList<Double>() // RMS of each frame counted as speech
                 var speechStarted = false
                 var speechFrames = 0
                 var silenceMs = 0
@@ -69,7 +78,18 @@ class AudioCapture(private val context: Context) {
                     elapsedMs += frameMs
 
                     val rms = rms(frame, n)
-                    val loud = rms > SPEECH_RMS
+                    frameIndex++
+                    // The first frames are mic warm-up (often digital silence or a click): ignore them.
+                    val warm = frameIndex > WARMUP_FRAMES
+                    if (warm && !speechStarted) {
+                        ambient.addLast(rms)
+                        if (ambient.size > AMBIENT_FRAMES) ambient.removeFirst()
+                        noise = ambient.min()
+                    }
+                    // Frozen once speech starts, so a quiet talker can't raise their own bar.
+                    val threshold = (noise * NOISE_FACTOR).coerceIn(MIN_SPEECH_RMS, MAX_SPEECH_RMS)
+                    val loud = warm && rms > threshold
+                    if (loud) speechLevels.add(rms)
 
                     val bytes = ByteArray(n * 2)
                     for (i in 0 until n) {
@@ -122,7 +142,13 @@ class AudioCapture(private val context: Context) {
                 } else if (!enough) {
                     post { onResult(null) }
                 } else {
-                    val file = writeWav(pcm.toByteArray())
+                    val samples = pcm.toByteArray()
+                    // Typical loudness of the speech; quiet talkers are lifted to a healthy level.
+                    val level = speechLevels.sorted()[(speechLevels.size * 0.9).toInt().coerceAtMost(speechLevels.size - 1)]
+                    val gain = (TARGET_RMS / level).coerceIn(1.0, MAX_GAIN)
+                    if (gain > 1.05) amplify(samples, gain)
+                    Log.d(TAG, "ambient=${noise.roundToInt()} speech=${level.roundToInt()} gain=${"%.1f".format(gain)}")
+                    val file = writeWav(samples)
                     post { onResult(file) }
                 }
             } catch (e: Exception) {
@@ -143,6 +169,18 @@ class AudioCapture(private val context: Context) {
     fun cancel() {
         active = false
         thread = null
+    }
+
+    /** Scale 16-bit little-endian PCM in place by [gain], clipping at full scale. */
+    private fun amplify(pcm: ByteArray, gain: Double) {
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val v = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8) // sign-extends via the high byte
+            val out = (v * gain).roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            pcm[i] = (out and 0xFF).toByte()
+            pcm[i + 1] = (out shr 8 and 0xFF).toByte()
+            i += 2
+        }
     }
 
     private fun rms(buf: ShortArray, n: Int): Double {
@@ -195,7 +233,18 @@ class AudioCapture(private val context: Context) {
         const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
         const val FRAME_SAMPLES = SAMPLE_RATE / 20 // 50ms frames
         const val PREROLL_MS = 600        // audio kept before detection so word onsets aren't clipped
-        const val SPEECH_RMS = 1000.0     // RMS above this = speech (higher = less noise-trigger)
+        const val TAG = "AudioCapture"
+        // Speech = RMS above NOISE_FACTOR x the room's ambient level, clamped to this range. The floor
+        // stops mic hiss counting as speech; the ceiling stops a wrong ambient estimate (e.g. someone
+        // already talking when recording began) from demanding a shout. Was a fixed 1000, which needed
+        // raised-voice, close-to-the-phone speaking.
+        const val MIN_SPEECH_RMS = 250.0
+        const val MAX_SPEECH_RMS = 700.0
+        const val NOISE_FACTOR = 3.0
+        const val WARMUP_FRAMES = 3       // 150 ms of mic start-up ignored for detection
+        const val AMBIENT_FRAMES = 20     // ~1 s window for the ambient estimate
+        const val TARGET_RMS = 3000.0     // level quiet speech is lifted to (about -20 dBFS)
+        const val MAX_GAIN = 12.0         // never amplify more than this, so noise isn't blown up
         const val END_SILENCE_MS = 1800   // trailing silence that ends a turn (allows mid-sentence pauses)
         const val NO_SPEECH_MS = 8000     // give up if nobody speaks
         const val MAX_MS = 30000          // hard cap on a single utterance

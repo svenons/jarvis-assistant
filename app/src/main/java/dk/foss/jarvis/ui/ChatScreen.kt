@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -51,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dk.foss.jarvis.data.SettingsStore
 import dk.foss.jarvis.data.UiMessage
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -65,9 +67,15 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     val messages = vm.messages
     val streaming by vm.isStreaming
+    val backgroundRun = vm.backgroundRun // a turn Hermes still works on with nobody listening
+    val channel by vm.deliverTarget
+    val name = LocalBranding.current.name
+    // Between your message (or a tool step) and the next words, show the assistant "typing".
+    val showTyping = streaming && messages.lastOrNull()?.role.let { it != "assistant" }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(messages.size, messages.lastOrNull()?.text, showTyping) {
+        val last = messages.size - 1 + if (showTyping) 1 else 0 // the typing bubble is one extra row
+        if (last >= 0) listState.animateScrollToItem(last)
     }
 
     DeepSpaceBackground(active = false) {
@@ -79,7 +87,7 @@ fun ChatScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             JarvisMark()
                             Text(
-                                "Jarvis",
+                                name,
                                 fontFamily = SpaceGrotesk,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.padding(start = 10.dp),
@@ -123,7 +131,7 @@ fun ChatScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "Ask Jarvis anything",
+                            "Ask $name anything",
                             fontFamily = SpaceGrotesk,
                             fontWeight = FontWeight.Medium,
                             fontSize = 18.sp,
@@ -139,22 +147,68 @@ fun ChatScreen(
                         contentPadding = PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        items(messages) { msg -> MessageBubble(msg) }
+                        items(messages) { msg ->
+                            if (msg.role == UiMessage.ROLE_REASONING) {
+                                ReasoningBlock(msg.text)
+                            } else if (msg.role == UiMessage.ROLE_TOOL) {
+                                ToolLine(
+                                    text = msg.text,
+                                    running = msg.toolId != null && !msg.toolDone,
+                                    done = msg.toolId != null && msg.toolDone,
+                                )
+                            } else {
+                                MessageBubble(msg)
+                            }
+                        }
+                        if (showTyping) item { MessageBubble(UiMessage("assistant", "")) }
                     }
                 }
+
+                if (backgroundRun != null) BackgroundBanner(onCancel = { vm.cancel() })
 
                 InputBar(
                     value = input,
                     onValueChange = { input = it },
                     streaming = streaming,
+                    blocked = backgroundRun != null,
+                    channel = channel,
                     onSend = {
                         vm.send(input)
                         input = ""
                     },
                     onStop = { vm.cancel() },
+                    onSendInBackground = {
+                        vm.sendInBackground(input)
+                        input = ""
+                    },
                 )
             }
         }
+    }
+}
+
+/** Shown while Hermes works on a turn nobody is listening to: the answer is added to the chat when it is done. */
+@Composable
+private fun BackgroundBanner(onCancel: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .background(JarvisColors.GlassBg, shape)
+            .border(1.dp, JarvisColors.Cyan.copy(alpha = 0.2f), shape)
+            .padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = JarvisColors.Cyan)
+        Text(
+            "Working in the background. The answer will appear here.",
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            fontFamily = DmSans,
+            fontSize = 13.sp,
+            color = JarvisColors.TextSecondary,
+        )
+        TextButton(onClick = onCancel) { Text("Cancel", fontFamily = DmSans, color = JarvisColors.ErrorOrange) }
     }
 }
 
@@ -196,7 +250,7 @@ private fun MessageBubble(msg: UiMessage) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Text(
-                text = msg.text.ifEmpty { "\u2026" },
+                text = msg.text.trimStart().ifEmpty { "\u2026" },
                 color = textColor,
                 fontFamily = DmSans,
                 fontWeight = FontWeight.Normal,
@@ -213,8 +267,11 @@ private fun InputBar(
     value: String,
     onValueChange: (String) -> Unit,
     streaming: Boolean,
+    blocked: Boolean,
+    channel: String,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onSendInBackground: () -> Unit,
 ) {
     val shape = RoundedCornerShape(99.dp)
     Surface(
@@ -237,7 +294,7 @@ private fun InputBar(
                 modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
-                        "Message Jarvis",
+                        "Message ${LocalBranding.current.name}",
                         fontFamily = DmSans,
                         color = JarvisColors.Muted,
                     )
@@ -251,8 +308,14 @@ private fun InputBar(
                     unfocusedTextColor = JarvisColors.TextPrimary,
                 ),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { if (!streaming) onSend() }),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { if (!streaming && !blocked) onSend() }),
             )
+            if (!streaming && value.isNotBlank() && channel != SettingsStore.DELIVER_OFF) {
+                // Hand the task to Hermes to finish on the server and deliver to the home channel (Settings).
+                TextButton(onClick = onSendInBackground) {
+                    Text("\u2192 ${channel.replaceFirstChar { it.uppercase() }}", fontFamily = DmSans, fontSize = 12.sp, color = JarvisColors.Cyan)
+                }
+            }
             if (streaming) {
                 IconButton(onClick = onStop) {
                     Icon(
@@ -262,11 +325,11 @@ private fun InputBar(
                     )
                 }
             } else {
-                IconButton(onClick = onSend, enabled = value.isNotBlank()) {
+                IconButton(onClick = onSend, enabled = value.isNotBlank() && !blocked) {
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Send",
-                        tint = if (value.isNotBlank()) JarvisColors.Cyan else JarvisColors.Muted,
+                        tint = if (value.isNotBlank() && !blocked) JarvisColors.Cyan else JarvisColors.Muted,
                     )
                 }
             }
