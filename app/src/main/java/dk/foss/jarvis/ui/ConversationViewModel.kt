@@ -170,7 +170,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     fun startListening(fromWake: Boolean = false) {
         claimTurn(fromWake)
         val myTurn = turn
-        // Immediate feedback: without this the screen sits unchanged for however long ensureReady()/isReachable()
+        // Immediate feedback: without this the screen sits unchanged for however long ensureReady()/probe()
         // take (up to a few seconds off-network), which looks broken rather than working.
         error.value = null
         hint.value = null
@@ -186,10 +186,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Check reachability before committing to a listen: otherwise being off the right network (e.g. away
             // from home wifi) only surfaces after the mic recorded and STT transcribed, for nothing.
-            val reachable = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).isReachable()
+            val probe = HermesClient(s.baseUrl, s.apiKey, s.cloudflareAccess).probe()
             if (turn != myTurn) return@launch
-            if (!reachable) {
-                error.value = "No connection to Hermes. Check your wifi, or set up a VPN/tunnel to reach it from outside your network."
+            if (probe != HermesClient.Probe.Reachable) {
+                error.value = if (probe == HermesClient.Probe.AccessBlocked) {
+                    "Cloudflare Access blocked the request. Check Settings > Cloudflare Access (Client ID, Secret) and its Service Auth policy."
+                } else {
+                    "No connection to Hermes. Check your wifi, or set up a VPN/tunnel to reach it from outside your network."
+                }
                 state.value = ConvState.Idle
                 return@launch
             }

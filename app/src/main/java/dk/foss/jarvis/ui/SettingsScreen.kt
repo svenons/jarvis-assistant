@@ -765,7 +765,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     text = "Save & test connection",
                     onClick = {
                         // Cloudflare Access on with a blank Client ID/Secret would silently send no CF-Access-* headers
-                        // at all (HermesClient.isReachable/fetchModels only add them once both are non-blank) \u2014 catch
+                        // at all (HermesClient.probe/fetchModels only add them once both are non-blank) \u2014 catch
                         // that here instead, so it's a clear error rather than a connection test that quietly skips
                         // the auth the user just turned on.
                         if (cfAccessEnabled && (cfClientId.isBlank() || cfClientSecret.isBlank())) {

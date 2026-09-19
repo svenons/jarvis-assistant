@@ -249,22 +249,40 @@ class HermesClient(
     /** GET /v1/models — returns model ids on success, or a failure with the reason. */
     suspend fun testConnection(): Result<List<String>> = fetchModels().map { models -> models.map { it.id } }
 
+    enum class Probe { Reachable, Unreachable, AccessBlocked }
+
     /**
      * A quick "can we even reach Hermes" check, with a short timeout ([httpProbe]) so being off the right
      * network (e.g. away from home wifi with no tunnel set up) fails in a few seconds instead of only surfacing
      * after the mic has recorded, STT has transcribed, and the real request has waited out its full timeout.
-     * Any HTTP response — even an error one — counts as reachable; only a failed connection doesn't.
+     * Any HTTP response from Hermes — even an error one — counts as reachable; only a failed connection doesn't.
+     * Cloudflare Access's login page is a response too, but not from Hermes: it is [Probe.AccessBlocked].
      */
-    suspend fun isReachable(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun probe(): Probe = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
                 .url("$baseUrl/v1/models")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .get()
                 .build()
-            httpProbe.newCall(req).execute().use { }
-            true
-        }.getOrDefault(false)
+            httpProbe.newCall(req).execute().use { resp ->
+                if (isAccessPage(resp)) Probe.AccessBlocked else Probe.Reachable
+            }
+        }.getOrDefault(Probe.Unreachable)
+    }
+
+    /**
+     * True if [resp] is Cloudflare Access turning the request away rather than an answer from Hermes: either the
+     * redirect to its login page (OkHttp follows it, so the final request is on a *.cloudflareaccess.com host), or
+     * the HTML 403 an Access app that only takes service tokens sends. A Hermes 401 that merely passed through
+     * Cloudflare is JSON, so it is not matched.
+     */
+    private fun isAccessPage(resp: Response): Boolean {
+        val host = resp.request.url.host
+        if (host != hermesHost && host.endsWith(".cloudflareaccess.com")) return true
+        return resp.code == 403 &&
+            resp.header("Server").equals("cloudflare", ignoreCase = true) &&
+            resp.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)
     }
 
     /**
@@ -279,9 +297,15 @@ class HermesClient(
                 .get()
                 .build()
             http.newCall(req).execute().use { resp ->
+                if (isAccessPage(resp)) throw RuntimeException(ACCESS_BLOCKED)
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
                     throw RuntimeException("HTTP ${resp.code}: ${text.take(200).ifBlank { resp.message }}")
+                }
+                // A 200 that is a web page (a proxy, a captive portal, the wrong URL) would otherwise surface as a
+                // JSON parser error about "<!DOCTYPE html>".
+                if (resp.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)) {
+                    throw RuntimeException("Got a web page instead of Hermes's JSON from ${resp.request.url.host}. Check that the URL points at Hermes.")
                 }
                 json.decodeFromString(ModelsResponse.serializer(), text).data
             }
@@ -536,5 +560,8 @@ class HermesClient(
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         const val TOOL_PROGRESS_EVENT = "hermes.tool.progress"
+        const val ACCESS_BLOCKED = "Cloudflare Access turned the request away (its login page came back instead of Hermes). " +
+            "Turn on Settings > Cloudflare Access with a Client ID and Secret, and make sure the Access policy for this " +
+            "host is a Service Auth policy that includes that token."
     }
 }
