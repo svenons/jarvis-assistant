@@ -1,3 +1,5 @@
+Abandoning in favor of [Hermes Relay](https://hermes-relay.dev/)
+
 # Jarvis — an Android assistant for Hermes
 
 Jarvis is an open-source Android app that turns your phone into a voice + chat
